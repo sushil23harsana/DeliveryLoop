@@ -7,6 +7,7 @@ import {
   createRelease,
   createTicket,
   getWorkspace,
+  resendMemberInvite,
   updateChecklist,
   updateMember,
   updateTicket,
@@ -30,6 +31,7 @@ export async function POST(request: Request) {
     switch (action) {
       case "createClient": result = await createClient(payload, actor); break;
       case "createMember": result = await createMember(payload, actor); break;
+      case "resendMemberInvite": result = await resendMemberInvite(payload, actor); break;
       case "updateMember": result = await updateMember(payload, actor); break;
       case "createProject": result = await createProject(payload, actor); break;
       case "createRelease": result = await createRelease(payload, actor); break;

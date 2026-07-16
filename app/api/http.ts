@@ -1,4 +1,4 @@
-import { getChatGPTUser } from "../chatgpt-auth";
+import { assertAuthConfigured, auth } from "../auth";
 import { AccessError, resolveActor, type Actor } from "../../db/workspace";
 
 export type ActionPayload = Record<string, string> & { checklist?: string[] };
@@ -9,8 +9,9 @@ function localDemoAllowed(request: Request) {
 }
 
 export async function requestActor(request: Request): Promise<Actor> {
-  const user = await getChatGPTUser();
-  return resolveActor(user ? { email: user.email, name: user.displayName } : null, localDemoAllowed(request));
+  assertAuthConfigured();
+  const session = await auth.api.getSession({ headers: request.headers });
+  return resolveActor(session?.user ? { email: session.user.email, name: session.user.name } : null, localDemoAllowed(request));
 }
 
 export function requireSameOrigin(request: Request) {

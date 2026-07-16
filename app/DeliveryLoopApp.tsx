@@ -43,6 +43,8 @@ import {
   Users,
   X,
 } from "lucide-react";
+import { AuthScreen } from "./AuthScreen";
+import { authClient } from "./auth-client";
 
 type Client = { id: string; name: string; contact_name: string; contact_email: string; accent: string; created_at: string };
 type Member = { id: string; email: string; name: string; role: string; client_id: string | null; active: string; invited_by: string; invited_at: string | null; last_seen_at: string | null; updated_at: string | null; created_at: string };
@@ -228,6 +230,11 @@ export function DeliveryLoopApp() {
     setModal("member");
   }
 
+  async function signOut() {
+    await authClient.signOut();
+    window.location.assign("/");
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -267,7 +274,7 @@ export function DeliveryLoopApp() {
           <div className="account-row">
             <span className="avatar">{initials(actor.name)}</span>
             <div><strong>{actor.name}</strong><small>{roleLabel(actor.role)}</small></div>
-            <a href="/signout-with-chatgpt?return_to=/" aria-label="Sign out"><LockKeyhole size={15} /></a>
+            <button className="account-signout" onClick={signOut} aria-label="Sign out" title="Sign out"><LockKeyhole size={15} /></button>
           </div>
         </div>
       </aside>
@@ -320,8 +327,7 @@ function LoadingScreen() {
 }
 
 function AccessScreen({ error }: { error: { status: number; message: string } }) {
-  const needsSignIn = error.status === 401;
-  return <main className="access-screen"><section><span className="brand-symbol large"><span /></span><p>DeliveryLoop</p><h1>{needsSignIn ? "Sign in to your workspace" : "Access has not been granted"}</h1><div>{error.message}</div>{needsSignIn ? <a className="primary-button" href="/signin-with-chatgpt?return_to=/"><LockKeyhole size={16} /> Sign in with ChatGPT</a> : <p className="access-note">Ask your DeliveryLoop administrator to add this email to the correct client or agency workspace.</p>}</section></main>;
+  return <AuthScreen status={error.status} message={error.message} />;
 }
 
 function Overview({ data, openTickets, blockers, retest, testingReleases, setView, setSelectedReleaseId, projectById, clientById, setSelectedTicketId }: { data: Workspace; openTickets: Ticket[]; blockers: Ticket[]; retest: Ticket[]; testingReleases: Release[]; setView: (view: View) => void; setSelectedReleaseId: (id: string) => void; projectById: (id: string) => Project | undefined; clientById: (id: string) => Client | undefined; setSelectedTicketId: (id: string) => void }) {
@@ -424,7 +430,7 @@ function FeedbackTable({ tickets, projects, onOpen, compact = false }: { tickets
 
 function Clients({ data, actor, openMemberModal, runAction, busy, notify }: { data: Workspace; actor: Actor; openMemberModal: (clientId: string) => void; runAction: (action: string, payload: ActionPayload, success: string) => Promise<void>; busy: boolean; notify: (message: string) => void }) {
   return <div className="page-content client-page">
-    <div className="access-intro surface"><div><ShieldCheck size={19} /><span><p>Tenant-aware access</p><h2>Every client is isolated to its own releases, feedback and public conversations.</h2></span></div><small>Access is matched to the exact ChatGPT account email invited here.</small></div>
+    <div className="access-intro surface"><div><ShieldCheck size={19} /><span><p>Tenant-aware access</p><h2>Every client is isolated to its own releases, feedback and public conversations.</h2></span></div><small>Access is matched to the exact verified email invited here.</small></div>
     <div className="client-list">{data.clients.map((client) => {
       const projects = data.projects.filter((project) => project.client_id === client.id);
       const members = data.members.filter((member) => member.client_id === client.id);
@@ -444,10 +450,11 @@ function Settings({ data, actor, openMemberModal, runAction, busy, notify }: { d
   const clientAdmins = new Set(data.members.filter((member) => member.role === "client_admin" && member.active === "1").map((member) => member.client_id));
   return <div className="page-content settings-page">
     <section className="security-grid">
-      <article className="surface security-card"><ShieldCheck size={19} /><div><p>Authentication</p><h2>Sign in with ChatGPT</h2><small>Identity is verified by the hosting platform. DeliveryLoop only grants access to invited emails.</small></div><span className="security-state"><i /> Enforced</span></article>
+      <article className="surface security-card"><ShieldCheck size={19} /><div><p>Authentication</p><h2>Email, password and verification</h2><small>Secure HTTP-only sessions, verified email ownership and invitation-only registration protect every account.</small></div><span className="security-state"><i /> Enforced</span></article>
       <article className="surface security-card"><LockKeyhole size={19} /><div><p>Authorisation</p><h2>Role and tenant controls</h2><small>Every server request checks the member role and client workspace before reading or changing data.</small></div><span className="security-state"><i /> Enforced</span></article>
       <article className="surface security-card"><Activity size={19} /><div><p>Protection</p><h2>Rate limits and audit trail</h2><small>Write actions are throttled and sensitive changes are attributed to the signed-in member.</small></div><span className="security-state"><i /> Active</span></article>
     </section>
+    <AccountSecurity notify={notify} />
     <section className="settings-grid">
       <article className="surface internal-team"><header className="section-header"><div><p>Agency workspace</p><h2>Internal delivery team</h2></div>{actor.role === "agency_admin" ? <button className="secondary-button" onClick={() => openMemberModal("agency")}><UserPlus size={15} /> Add teammate</button> : null}</header><MemberDirectory members={staff} actor={actor} runAction={runAction} busy={busy} notify={notify} /></article>
       <aside className="surface readiness-card"><header><p>Access readiness</p><h2>Client onboarding</h2></header><div className="readiness-number">{activeClientMembers}<span>active client members</span></div><div className="readiness-list"><div><CheckCircle2 size={15} /><span><b>Owner identity secured</b><small>{actor.email}</small></span></div><div><CheckCircle2 size={15} /><span><b>{data.clients.length} client workspaces isolated</b><small>API and attachment access checked server-side</small></span></div><div className={clientAdmins.size === data.clients.length ? "" : "pending"}><AlertCircle size={15} /><span><b>{clientAdmins.size} of {data.clients.length} clients have an admin</b><small>Add one client admin before handing over each portal.</small></span></div></div></aside>
@@ -455,9 +462,34 @@ function Settings({ data, actor, openMemberModal, runAction, busy, notify }: { d
   </div>;
 }
 
+function AccountSecurity({ notify }: { notify: (message: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  async function changePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const currentPassword = field(form, "currentPassword");
+    const newPassword = field(form, "newPassword");
+    const confirmPassword = field(form, "confirmPassword");
+    if (newPassword !== confirmPassword) return notify("New passwords do not match");
+    setSaving(true);
+    const result = await authClient.changePassword({ currentPassword, newPassword, revokeOtherSessions: true });
+    setSaving(false);
+    if (result.error) return notify(result.error.message || "Password could not be changed");
+    event.currentTarget.reset();
+    setOpen(false);
+    notify("Password changed and other sessions signed out");
+  }
+  return <section className="surface account-security-panel"><div><KeyRoundIcon /><span><p>Your account</p><h2>Password and active sessions</h2><small>Changing your password signs out every other browser and device.</small></span></div>{open ? <form onSubmit={changePassword}><input name="currentPassword" type="password" autoComplete="current-password" required placeholder="Current password" /><input name="newPassword" type="password" autoComplete="new-password" minLength={12} maxLength={128} required placeholder="New password (12+ characters)" /><input name="confirmPassword" type="password" autoComplete="new-password" minLength={12} maxLength={128} required placeholder="Confirm new password" /><button type="button" className="quiet-button" onClick={() => setOpen(false)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? "Saving…" : "Update password"}</button></form> : <button className="secondary-button" onClick={() => setOpen(true)}>Change password</button>}</section>;
+}
+
+function KeyRoundIcon() {
+  return <span className="account-security-icon"><LockKeyhole size={18} /></span>;
+}
+
 function MemberDirectory({ members, actor, runAction, busy, notify }: { members: Member[]; actor: Actor; runAction: (action: string, payload: ActionPayload, success: string) => Promise<void>; busy: boolean; notify: (message: string) => void }) {
   async function copyAccessLink(member: Member) {
-    const link = `${window.location.origin}/signin-with-chatgpt?return_to=%2F`;
+    const link = `${window.location.origin}/?auth=activate&email=${encodeURIComponent(member.email)}`;
     try {
       await navigator.clipboard.writeText(link);
       notify(`Sign-in link copied for ${member.name}`);
@@ -465,11 +497,8 @@ function MemberDirectory({ members, actor, runAction, busy, notify }: { members:
       notify("Could not copy the link. Open the sign-in page and copy it from the address bar.");
     }
   }
-  function emailInvite(member: Member) {
-    const link = `${window.location.origin}/signin-with-chatgpt?return_to=%2F`;
-    const subject = "Your DeliveryLoop access";
-    const body = `Hi ${member.name},\n\nYou have been invited to DeliveryLoop. Sign in with the ChatGPT account that uses ${member.email}:\n\n${link}\n\nThanks`;
-    window.location.href = `mailto:${encodeURIComponent(member.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  async function emailInvite(member: Member) {
+    await runAction("resendMemberInvite", { memberId: member.id }, `Invitation emailed to ${member.email}`);
   }
   if (!members.length) return <div className="member-empty"><Users size={18} /><span><b>No members yet</b><small>Invite the first person who should have access.</small></span></div>;
   return <div className="member-list managed-members">
@@ -482,7 +511,7 @@ function MemberDirectory({ members, actor, runAction, busy, notify }: { members:
         <select aria-label={`Role for ${member.name}`} value={member.role} disabled={busy || isSelf || actor.role !== "agency_admin" && actor.role !== "client_admin"} onChange={(event) => runAction("updateMember", { memberId: member.id, role: event.target.value }, `Role updated for ${member.name}`)}>{roles.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
         <span className="member-activity"><Clock3 size={13} />{member.last_seen_at ? `Seen ${formatDate(member.last_seen_at)}` : `Invited ${formatDate(member.invited_at || member.created_at)}`}</span>
         <button className={member.active === "1" ? "access-toggle active" : "access-toggle"} disabled={busy || isSelf || actor.role !== "agency_admin" && actor.role !== "client_admin"} onClick={() => runAction("updateMember", { memberId: member.id, active: member.active === "1" ? "0" : "1" }, member.active === "1" ? `Access suspended for ${member.name}` : `Access restored for ${member.name}`)}>{member.active === "1" ? <><UserCheck size={14} /> Active</> : <><UserX size={14} /> Suspended</>}</button>
-        <span className="member-invite-actions"><button onClick={() => copyAccessLink(member)} aria-label={`Copy sign-in link for ${member.name}`} title="Copy sign-in link"><Copy size={14} /></button><button onClick={() => emailInvite(member)} aria-label={`Email ${member.name}`} title="Prepare invite email" disabled={member.active !== "1"}><Mail size={14} /></button></span>
+        <span className="member-invite-actions"><button onClick={() => copyAccessLink(member)} aria-label={`Copy activation link for ${member.name}`} title="Copy activation link"><Copy size={14} /></button><button onClick={() => emailInvite(member)} aria-label={`Resend invitation to ${member.name}`} title="Resend invitation" disabled={busy || member.active !== "1"}><Mail size={14} /></button></span>
       </div>;
     })}
   </div>;
@@ -506,7 +535,7 @@ function ActionModal({ modal, data, isClientView, selectedRelease, memberClientI
     event.preventDefault(); const form = new FormData(event.currentTarget);
     try {
       if (modal === "client") return runAction("createClient", { name: field(form, "name"), contactName: field(form, "contactName"), contactEmail: field(form, "contactEmail"), accent: field(form, "accent") }, "Client workspace created");
-      if (modal === "member") return runAction("createMember", { clientId: isAgencyMember ? "" : memberClientId || field(form, "clientId"), name: field(form, "name"), email: field(form, "email"), role: field(form, "role") }, "Invitation prepared");
+      if (modal === "member") return runAction("createMember", { clientId: isAgencyMember ? "" : memberClientId || field(form, "clientId"), name: field(form, "name"), email: field(form, "email"), role: field(form, "role") }, "Member access created");
       if (modal === "project") return runAction("createProject", { clientId: field(form, "clientId"), name: field(form, "name"), code: field(form, "code"), description: field(form, "description"), manager: field(form, "manager"), stage: "UAT", stagingUrl: field(form, "stagingUrl") }, "Project created");
       if (modal === "release") return runAction("createRelease", { projectId: field(form, "projectId"), name: field(form, "name"), version: field(form, "version"), build: field(form, "build"), startDate: field(form, "startDate"), dueDate: field(form, "dueDate"), testingNotes: field(form, "testingNotes"), checklist: field(form, "checklist").split("\n").filter(Boolean) }, "Release prepared");
       const file = form.get("screenshot"); let attachmentKey = "";
@@ -522,7 +551,7 @@ function ActionModal({ modal, data, isClientView, selectedRelease, memberClientI
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section className="modal-card" role="dialog" aria-modal="true" aria-label={title}><header><div><p>DeliveryLoop</p><h2>{title}</h2></div><button onClick={close} aria-label="Close"><X size={19} /></button></header><form onSubmit={submit}>
     {modal === "feedback" ? <><label className="span-2">Release<select name="releaseId" defaultValue={selectedRelease?.id || data.releases[0]?.id}>{data.releases.map((release) => <option key={release.id} value={release.id}>{data.projects.find((project) => project.id === release.project_id)?.name} · {release.version}</option>)}</select></label><label>Feedback type<select name="type" defaultValue="Bug"><option>Bug</option><option>Change request</option><option>Content</option><option>Question</option></select></label><label>Severity<select name="severity" defaultValue="Medium"><option>Critical</option><option>High</option><option>Medium</option><option>Low</option></select></label><label className="span-2">Short title<input name="title" placeholder="Describe the issue clearly" required /></label><label className="span-2">What happened?<textarea name="actual" placeholder="What did you see and how did you get here?" required /></label><label className="span-2">What did you expect?<textarea name="expected" placeholder="Describe the expected result" required /></label><label className="span-2">Page or screen<input name="pageUrl" placeholder="/checkout/payment or a staging URL" /></label><label className="span-2 upload-field"><UploadCloud size={18} /><span><b>Attach a screenshot</b><small>PNG, JPG, WebP or GIF, up to 8 MB</small></span><input name="screenshot" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /></label></> : null}
     {modal === "client" ? <><label className="span-2">Company name<input name="name" required placeholder="Acme Limited" /></label><label>Primary contact<input name="contactName" required placeholder="Contact name" /></label><label>Email<input name="contactEmail" type="email" required placeholder="client@company.com" /></label><label className="span-2">Workspace colour<input name="accent" type="color" defaultValue="#3157D5" /></label></> : null}
-    {modal === "member" ? <><div className="modal-callout span-2"><ShieldCheck size={17} /><span>Access is granted only when this exact email signs in with ChatGPT.</span></div>{!isAgencyMember ? <label className="span-2">Client<select name="clientId" defaultValue={memberClientId || ""} disabled={Boolean(memberClientId)}>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</select></label> : null}<label>Name<input name="name" required maxLength={120} placeholder="Full name" /></label><label>Email<input name="email" type="email" required maxLength={254} placeholder={isAgencyMember ? "person@agency.com" : "person@client.com"} /></label><label className="span-2">Role<select name="role" defaultValue={isAgencyMember ? "project_manager" : "client_tester"}>{isAgencyMember ? <><option value="agency_admin">Agency admin</option><option value="project_manager">Project manager</option><option value="developer">Developer</option></> : <><option value="client_admin">Client admin</option><option value="client_tester">Client tester</option><option value="client_viewer">Client viewer</option></>}</select></label></> : null}
+    {modal === "member" ? <><div className="modal-callout span-2"><ShieldCheck size={17} /><span>An activation email is sent to this exact address. Registration is invitation-only.</span></div>{!isAgencyMember ? <label className="span-2">Client<select name="clientId" defaultValue={memberClientId || ""} disabled={Boolean(memberClientId)}>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</select></label> : null}<label>Name<input name="name" required maxLength={120} placeholder="Full name" /></label><label>Email<input name="email" type="email" required maxLength={254} placeholder={isAgencyMember ? "person@agency.com" : "person@client.com"} /></label><label className="span-2">Role<select name="role" defaultValue={isAgencyMember ? "project_manager" : "client_tester"}>{isAgencyMember ? <><option value="agency_admin">Agency admin</option><option value="project_manager">Project manager</option><option value="developer">Developer</option></> : <><option value="client_admin">Client admin</option><option value="client_tester">Client tester</option><option value="client_viewer">Client viewer</option></>}</select></label></> : null}
     {modal === "project" ? <><label className="span-2">Client<select name="clientId">{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</select></label><label>Project name<input name="name" required placeholder="Customer portal" /></label><label>Project code<input name="code" required maxLength={8} placeholder="CPT" /></label><label className="span-2">Purpose<textarea name="description" required placeholder="What is being delivered?" /></label><label>Project lead<input name="manager" required placeholder="Team member" /></label><label>Staging URL<input name="stagingUrl" type="url" placeholder="https://staging.example.com" /></label></> : null}
     {modal === "release" ? <><label className="span-2">Project<select name="projectId">{data.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="span-2">Release name<input name="name" required placeholder="Checkout and promotions UAT" /></label><label>Version<input name="version" required placeholder="v1.0" /></label><label>Build<input name="build" required placeholder="build-001" /></label><label>Testing starts<input name="startDate" type="date" required /></label><label>Testing due<input name="dueDate" type="date" required /></label><label className="span-2">Testing instructions<textarea name="testingNotes" required placeholder="What should the client focus on?" /></label><label className="span-2">Acceptance checklist<textarea name="checklist" required placeholder={"One acceptance flow per line\nGuest checkout\nPayment recovery\nEmail confirmation"} /></label></> : null}
     <footer><button type="button" className="quiet-button" onClick={close}>Cancel</button><button className="primary-button" disabled={busy}>{busy ? "Saving…" : isClientView && modal === "feedback" ? "Submit to delivery team" : "Save"}</button></footer>

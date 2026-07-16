@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
+import { queueInvitationEmail } from "../app/email";
 
-type Bindings = { DB: D1Database; UPLOADS: R2Bucket; BOOTSTRAP_ADMIN_EMAIL?: string };
+type Bindings = { APP_ENV?: string; DB: D1Database; UPLOADS?: R2Bucket; BOOTSTRAP_ADMIN_EMAIL?: string };
 
 export type Actor = {
   id: string;
@@ -20,10 +21,41 @@ export class AccessError extends Error {
 }
 
 function bindings(): Bindings {
-  return env as Bindings;
+  return env as unknown as Bindings;
 }
 
 const tableStatements = [
+  `CREATE TABLE IF NOT EXISTS "user" (
+    "id" TEXT NOT NULL PRIMARY KEY, "name" TEXT NOT NULL,
+    "email" TEXT NOT NULL UNIQUE, "emailVerified" INTEGER NOT NULL,
+    "image" TEXT, "createdAt" DATE NOT NULL, "updatedAt" DATE NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS "session" (
+    "id" TEXT NOT NULL PRIMARY KEY, "expiresAt" DATE NOT NULL,
+    "token" TEXT NOT NULL UNIQUE, "createdAt" DATE NOT NULL,
+    "updatedAt" DATE NOT NULL, "ipAddress" TEXT, "userAgent" TEXT,
+    "userId" TEXT NOT NULL REFERENCES "user"("id") ON DELETE CASCADE
+  )`,
+  `CREATE TABLE IF NOT EXISTS "account" (
+    "id" TEXT NOT NULL PRIMARY KEY, "accountId" TEXT NOT NULL,
+    "providerId" TEXT NOT NULL, "userId" TEXT NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
+    "accessToken" TEXT, "refreshToken" TEXT, "idToken" TEXT,
+    "accessTokenExpiresAt" DATE, "refreshTokenExpiresAt" DATE,
+    "scope" TEXT, "password" TEXT, "createdAt" DATE NOT NULL, "updatedAt" DATE NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS "verification" (
+    "id" TEXT NOT NULL PRIMARY KEY, "identifier" TEXT NOT NULL,
+    "value" TEXT NOT NULL, "expiresAt" DATE NOT NULL,
+    "createdAt" DATE NOT NULL, "updatedAt" DATE NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS "jwks" (
+    "id" TEXT NOT NULL PRIMARY KEY, "publicKey" TEXT NOT NULL,
+    "privateKey" TEXT NOT NULL, "createdAt" DATE NOT NULL, "expiresAt" DATE
+  )`,
+  `CREATE TABLE IF NOT EXISTS "rateLimit" (
+    "id" TEXT NOT NULL PRIMARY KEY, "key" TEXT NOT NULL UNIQUE,
+    "count" INTEGER NOT NULL, "lastRequest" BIGINT NOT NULL
+  )`,
   `CREATE TABLE IF NOT EXISTS clients (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, contact_name TEXT NOT NULL,
     contact_email TEXT NOT NULL, accent TEXT NOT NULL DEFAULT '#3157D5',
@@ -78,6 +110,9 @@ const tableStatements = [
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS members_client_idx ON members(client_id)`,
+  `CREATE INDEX IF NOT EXISTS "session_userId_idx" ON "session"("userId")`,
+  `CREATE INDEX IF NOT EXISTS "account_userId_idx" ON "account"("userId")`,
+  `CREATE INDEX IF NOT EXISTS "verification_identifier_idx" ON "verification"("identifier")`,
   `CREATE INDEX IF NOT EXISTS rate_limit_actor_action_idx ON rate_limit_events(actor_id, action, created_at)`,
   `CREATE INDEX IF NOT EXISTS tickets_project_idx ON tickets(project_id)`,
   `CREATE INDEX IF NOT EXISTS tickets_release_idx ON tickets(release_id)`,
@@ -147,6 +182,9 @@ export function canSubmitFeedback(actor: Actor) {
 export async function ensureDatabase() {
   const db = bindings().DB;
   if (!db) throw new Error("Database binding is unavailable");
+  // Production schema and data lifecycle are migration-controlled. Runtime
+  // table creation and demo fixtures are intentionally local-development only.
+  if (bindings().APP_ENV === "production") return db;
   await db.batch(tableStatements.map((statement) => db.prepare(statement)));
   await ensureMemberColumns(db);
   const clients = await db.prepare("SELECT COUNT(*) AS count FROM clients").first<{ count: number }>();
@@ -390,7 +428,29 @@ export async function createMember(input: Record<string, string>, actor: Actor) 
   await db.prepare("INSERT INTO members (id,email,name,role,client_id,invited_by,invited_at,updated_at) VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
     .bind(memberId, email, name, role, clientId, actor.name).run();
   await audit(db, "member", memberId, "Member invited", actor, email);
-  return memberId;
+  const emailQueued = await queueInvitationEmail({ id: memberId, email, name }, actor.name);
+  return { memberId, emailQueued };
+}
+
+export async function resendMemberInvite(input: Record<string, string>, actor: Actor) {
+  const db = await ensureDatabase();
+  const memberId = required(input, "memberId", "Member", 100);
+  const member = await db.prepare("SELECT id,email,name,role,client_id,active FROM members WHERE id = ?")
+    .bind(memberId).first<{ id: string; email: string; name: string; role: string; client_id: string | null; active: string }>();
+  if (!member) throw new AccessError("Member not found", 404);
+  if (actor.isStaff) {
+    requireRole(actor, ["agency_admin"], "Only an agency administrator can manage access");
+  } else if (!(actor.role === "client_admin" && actor.clientId === member.client_id && !isStaffRole(member.role))) {
+    throw new AccessError("You cannot manage this member");
+  }
+  if (member.active !== "1") throw new AccessError("Restore this member's access before resending the invitation", 400);
+  await enforceRateLimit(actor, "member:resend-invite", 20, 60);
+  const emailQueued = await queueInvitationEmail(member, actor.name, crypto.randomUUID());
+  if (!emailQueued) throw new AccessError("Email delivery is not configured yet", 503);
+  await db.prepare("UPDATE members SET invited_by = ?, invited_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    .bind(actor.name, member.id).run();
+  await audit(db, "member", member.id, "Invitation resent", actor, member.email);
+  return { memberId: member.id, emailQueued };
 }
 
 export async function updateMember(input: Record<string, string>, actor: Actor) {
@@ -426,6 +486,10 @@ export async function updateMember(input: Record<string, string>, actor: Actor) 
   await enforceRateLimit(actor, "member:update", 120, 60);
   await db.prepare("UPDATE members SET role = ?, active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
     .bind(nextRole, nextActive, memberId).run();
+  if (nextActive === "0" && member.active !== "0") {
+    await db.prepare('DELETE FROM "session" WHERE "userId" IN (SELECT "id" FROM "user" WHERE lower("email") = ?)')
+      .bind(member.email.toLowerCase()).run();
+  }
   await audit(db, "member", memberId, nextActive === "1" ? "Member access updated" : "Member access suspended", actor, `${member.email} - ${nextRole}`);
 }
 

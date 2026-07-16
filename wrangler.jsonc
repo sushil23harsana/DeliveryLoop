@@ -1,0 +1,35 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "deliveryloop",
+  "main": "./worker/index.ts",
+  "account_id": "182a16f38154f634935ba184bed0a873",
+  "compatibility_date": "2026-07-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "upload_source_maps": true,
+  "assets": {
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "images": {
+    "binding": "IMAGES"
+  },
+  "vars": {
+    "APP_ENV": "production",
+    "BETTER_AUTH_URL": "https://deliveryloop.altrd-brain.workers.dev",
+    "BOOTSTRAP_ADMIN_EMAIL": "sushil23harsana@gmail.com"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "deliveryloop-prod",
+      "database_id": "c2fbe7ea-c15d-4784-bdc2-19fbff14aecb",
+      "migrations_dir": "./drizzle"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}
