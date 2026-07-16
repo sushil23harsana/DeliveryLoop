@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const clients = sqliteTable("clients", {
   id: text("id").primaryKey(),
@@ -17,8 +17,19 @@ export const members = sqliteTable("members", {
   role: text("role").notNull(),
   clientId: text("client_id").references(() => clients.id),
   active: text("active").notNull().default("1"),
+  invitedBy: text("invited_by").notNull().default("System"),
+  invitedAt: text("invited_at"),
+  lastSeenAt: text("last_seen_at"),
+  updatedAt: text("updated_at"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
-});
+}, (table) => [index("members_client_idx").on(table.clientId)]);
+
+export const rateLimitEvents = sqliteTable("rate_limit_events", {
+  id: text("id").primaryKey(),
+  actorId: text("actor_id").notNull().references(() => members.id),
+  action: text("action").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [index("rate_limit_actor_action_idx").on(table.actorId, table.action, table.createdAt)]);
 
 export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(),

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 
-type Bindings = { DB: D1Database; UPLOADS: R2Bucket };
+type Bindings = { DB: D1Database; UPLOADS: R2Bucket; BOOTSTRAP_ADMIN_EMAIL?: string };
 
 export type Actor = {
   id: string;
@@ -20,7 +20,7 @@ export class AccessError extends Error {
 }
 
 function bindings(): Bindings {
-  return env as unknown as Bindings;
+  return env as Bindings;
 }
 
 const tableStatements = [
@@ -32,6 +32,12 @@ const tableStatements = [
   `CREATE TABLE IF NOT EXISTS members (
     id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
     role TEXT NOT NULL, client_id TEXT, active TEXT NOT NULL DEFAULT '1',
+    invited_by TEXT NOT NULL DEFAULT 'System', invited_at TEXT,
+    last_seen_at TEXT, updated_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS rate_limit_events (
+    id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, action TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE TABLE IF NOT EXISTS projects (
@@ -72,6 +78,7 @@ const tableStatements = [
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE INDEX IF NOT EXISTS members_client_idx ON members(client_id)`,
+  `CREATE INDEX IF NOT EXISTS rate_limit_actor_action_idx ON rate_limit_events(actor_id, action, created_at)`,
   `CREATE INDEX IF NOT EXISTS tickets_project_idx ON tickets(project_id)`,
   `CREATE INDEX IF NOT EXISTS tickets_release_idx ON tickets(release_id)`,
   `CREATE INDEX IF NOT EXISTS tickets_status_idx ON tickets(status)`,
@@ -82,18 +89,84 @@ function id(prefix: string) {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
+const STAFF_ROLES = new Set(["agency_admin", "project_manager", "developer"]);
+const CLIENT_ROLES = new Set(["client_admin", "client_tester", "client_viewer"]);
+const MEMBER_ROLES = new Set([...STAFF_ROLES, ...CLIENT_ROLES]);
+const TICKET_TYPES = new Set(["Bug", "Change request", "Content", "Question"]);
+const SEVERITIES = new Set(["Critical", "High", "Medium", "Low"]);
+const PRIORITIES = new Set(["Urgent", "High", "Normal", "Low"]);
+const TICKET_STATUSES = new Set(["Submitted", "Triaged", "In progress", "Needs information", "Approval required", "Ready for retest", "Verified", "Closed", "Deferred", "Rejected / out of scope", "Reopened"]);
+const CHECK_STATES = new Set(["Not tested", "Passed", "Failed"]);
+
+function required(input: Record<string, string>, key: string, label: string, max = 500) {
+  const value = (input[key] || "").trim();
+  if (!value) throw new AccessError(`${label} is required`, 400);
+  if (value.length > max) throw new AccessError(`${label} is too long`, 400);
+  return value;
+}
+
+function optional(input: Record<string, string>, key: string, max = 2000) {
+  const value = (input[key] || "").trim();
+  if (value.length > max) throw new AccessError(`${key} is too long`, 400);
+  return value;
+}
+
+function choice(input: Record<string, string>, key: string, label: string, values: Set<string>) {
+  const value = required(input, key, label, 80);
+  if (!values.has(value)) throw new AccessError(`Choose a valid ${label.toLowerCase()}`, 400);
+  return value;
+}
+
+function emailAddress(input: Record<string, string>, key = "email") {
+  const value = required(input, key, "Email", 254).toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) throw new AccessError("Enter a valid email address", 400);
+  return value;
+}
+
+function safeUrl(input: Record<string, string>, key: string, label: string) {
+  const value = optional(input, key, 2048);
+  if (!value) return "";
+  if (value.startsWith("/")) return value;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("protocol");
+    return parsed.toString();
+  } catch {
+    throw new AccessError(`${label} must be a valid web address`, 400);
+  }
+}
+
 export function isStaffRole(role: string) {
-  return ["agency_admin", "project_manager", "developer"].includes(role);
+  return STAFF_ROLES.has(role);
+}
+
+export function canSubmitFeedback(actor: Actor) {
+  return actor.isStaff || actor.role === "client_admin" || actor.role === "client_tester";
 }
 
 export async function ensureDatabase() {
   const db = bindings().DB;
   if (!db) throw new Error("Database binding is unavailable");
   await db.batch(tableStatements.map((statement) => db.prepare(statement)));
+  await ensureMemberColumns(db);
   const clients = await db.prepare("SELECT COUNT(*) AS count FROM clients").first<{ count: number }>();
   if (!clients?.count) await seedDatabase(db);
   await ensureMemberSeeds(db);
   return db;
+}
+
+async function ensureMemberColumns(db: D1Database) {
+  const columns = await db.prepare("PRAGMA table_info(members)").all<{ name: string }>();
+  const existing = new Set(columns.results.map((column) => column.name));
+  const additions = [
+    ["invited_by", "ALTER TABLE members ADD COLUMN invited_by TEXT NOT NULL DEFAULT 'System'"],
+    ["invited_at", "ALTER TABLE members ADD COLUMN invited_at TEXT"],
+    ["last_seen_at", "ALTER TABLE members ADD COLUMN last_seen_at TEXT"],
+    ["updated_at", "ALTER TABLE members ADD COLUMN updated_at TEXT"],
+  ] as const;
+  for (const [name, statement] of additions) {
+    if (!existing.has(name)) await db.prepare(statement).run();
+  }
 }
 
 async function ensureMemberSeeds(db: D1Database) {
@@ -164,23 +237,24 @@ export async function resolveActor(identity: { email: string; name: string } | n
   }
 
   const normalizedEmail = identity.email.trim().toLowerCase();
-  let row = await db.prepare("SELECT id,email,name,role,client_id,active FROM members WHERE lower(email) = ?")
+  let row = await db.prepare("SELECT id,email,name,role,client_id,active,invited_by,invited_at,last_seen_at,updated_at FROM members WHERE lower(email) = ?")
     .bind(normalizedEmail).first<Record<string, string | null>>();
 
   if (!row) {
-    const realAdmins = await db.prepare("SELECT COUNT(*) AS count FROM members WHERE role = 'agency_admin' AND email != 'demo@deliveryloop.local' AND active = '1'")
-      .first<{ count: number }>();
-    if ((realAdmins?.count || 0) === 0) {
+    const bootstrapEmail = (bindings().BOOTSTRAP_ADMIN_EMAIL || "").trim().toLowerCase();
+    if (bootstrapEmail && normalizedEmail === bootstrapEmail) {
       const memberId = id("member");
-      await db.prepare("INSERT INTO members (id,email,name,role,client_id) VALUES (?,?,?,?,?)")
-        .bind(memberId, normalizedEmail, identity.name, "agency_admin", null).run();
-      row = { id: memberId, email: normalizedEmail, name: identity.name, role: "agency_admin", client_id: null, active: "1" };
+      await db.prepare("INSERT INTO members (id,email,name,role,client_id,invited_by,invited_at,updated_at) VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
+        .bind(memberId, normalizedEmail, identity.name, "agency_admin", null, "Owner bootstrap").run();
+      row = { id: memberId, email: normalizedEmail, name: identity.name, role: "agency_admin", client_id: null, active: "1", invited_by: "Owner bootstrap", invited_at: null, last_seen_at: null, updated_at: null };
     } else {
       throw new AccessError("This account has not been invited to DeliveryLoop", 403);
     }
   }
 
   if (row.active !== "1") throw new AccessError("This account is inactive", 403);
+  await db.prepare("UPDATE members SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < datetime('now', '-1 hour'))")
+    .bind(String(row.id)).run();
   const role = String(row.role);
   return {
     id: String(row.id),
@@ -202,7 +276,7 @@ export async function getWorkspace(actor: Actor) {
     db.prepare("SELECT * FROM tickets ORDER BY updated_at DESC, created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM comments ORDER BY created_at ASC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM audit_events ORDER BY created_at DESC LIMIT 50").all<Record<string, unknown>>(),
-    db.prepare("SELECT id,email,name,role,client_id,active,created_at FROM members ORDER BY created_at DESC").all<Record<string, unknown>>(),
+    db.prepare("SELECT id,email,name,role,client_id,active,invited_by,invited_at,last_seen_at,updated_at,created_at FROM members ORDER BY created_at DESC").all<Record<string, unknown>>(),
   ]);
 
   if (actor.isStaff) {
@@ -238,6 +312,17 @@ async function audit(db: D1Database, entityType: string, entityId: string, actio
     .bind(id("audit"), entityType, entityId, action, actor.name, details).run();
 }
 
+export async function enforceRateLimit(actor: Actor, action: string, limit: number, windowMinutes: number) {
+  const db = await ensureDatabase();
+  const recent = await db.prepare("SELECT COUNT(*) AS count FROM rate_limit_events WHERE actor_id = ? AND action = ? AND created_at >= datetime('now', ?)")
+    .bind(actor.id, action, `-${windowMinutes} minutes`).first<{ count: number }>();
+  if ((recent?.count || 0) >= limit) throw new AccessError("Too many requests. Please wait and try again.", 429);
+  await db.batch([
+    db.prepare("INSERT INTO rate_limit_events (id,actor_id,action) VALUES (?,?,?)").bind(id("rate"), actor.id, action),
+    db.prepare("DELETE FROM rate_limit_events WHERE created_at < datetime('now', '-2 days')"),
+  ]);
+}
+
 async function projectClientId(db: D1Database, projectId: string) {
   const project = await db.prepare("SELECT client_id FROM projects WHERE id = ?").bind(projectId).first<{ client_id: string }>();
   if (!project) throw new AccessError("Project not found", 404);
@@ -261,72 +346,169 @@ async function assertTicketAccess(db: D1Database, actor: Actor, ticketId: string
   await assertProjectAccess(db, actor, ticket.project_id);
 }
 
-function requireStaff(actor: Actor) {
-  if (!actor.isStaff) throw new AccessError("This action is limited to the delivery team");
+function requireRole(actor: Actor, roles: string[], message: string) {
+  if (!roles.includes(actor.role)) throw new AccessError(message);
 }
 
 export async function createClient(input: Record<string, string>, actor: Actor) {
-  requireStaff(actor);
+  requireRole(actor, ["agency_admin"], "Only an agency administrator can create client workspaces");
   const db = await ensureDatabase();
+  const name = required(input, "name", "Client name", 120);
+  const contactName = required(input, "contactName", "Contact name", 120);
+  const contactEmail = emailAddress(input, "contactEmail");
+  const accent = /^#[0-9a-f]{6}$/i.test(input.accent || "") ? input.accent : "#3157D5";
+  await enforceRateLimit(actor, "client:create", 20, 60);
   const clientId = id("client");
   await db.prepare("INSERT INTO clients (id,name,contact_name,contact_email,accent) VALUES (?,?,?,?,?)")
-    .bind(clientId, input.name, input.contactName, input.contactEmail.toLowerCase(), input.accent || "#3157D5").run();
-  await audit(db, "client", clientId, "Client added", actor, input.name);
+    .bind(clientId, name, contactName, contactEmail, accent).run();
+  await audit(db, "client", clientId, "Client added", actor, name);
   return clientId;
 }
 
 export async function createMember(input: Record<string, string>, actor: Actor) {
   const db = await ensureDatabase();
-  if (!actor.isStaff && !(actor.role === "client_admin" && actor.clientId === input.clientId)) {
+  const clientId = optional(input, "clientId", 100) || null;
+  if (actor.isStaff) {
+    requireRole(actor, ["agency_admin"], "Only an agency administrator can manage access");
+  } else if (!(actor.role === "client_admin" && actor.clientId === clientId)) {
     throw new AccessError("You cannot manage members for this client");
   }
-  const role = input.role || "client_tester";
-  if (!["agency_admin", "project_manager", "developer", "client_admin", "client_tester", "client_viewer"].includes(role)) {
-    throw new AccessError("Choose a valid member role", 400);
-  }
+  const role = choice(input, "role", "Role", MEMBER_ROLES);
   if (!actor.isStaff && isStaffRole(role)) throw new AccessError("Client administrators cannot create staff accounts");
-  if (!isStaffRole(role) && !input.clientId) throw new AccessError("Choose a client workspace", 400);
+  if (isStaffRole(role) && clientId) throw new AccessError("Internal team members cannot belong to a client workspace", 400);
+  if (!isStaffRole(role) && !clientId) throw new AccessError("Choose a client workspace", 400);
+  if (clientId) {
+    const client = await db.prepare("SELECT id FROM clients WHERE id = ?").bind(clientId).first<{ id: string }>();
+    if (!client) throw new AccessError("Client workspace not found", 404);
+  }
+  const email = emailAddress(input);
+  const name = required(input, "name", "Name", 120);
+  const existing = await db.prepare("SELECT id FROM members WHERE lower(email) = ?").bind(email).first<{ id: string }>();
+  if (existing) throw new AccessError("This email already has DeliveryLoop access", 409);
+  await enforceRateLimit(actor, "member:create", 50, 60);
   const memberId = id("member");
-  await db.prepare("INSERT INTO members (id,email,name,role,client_id) VALUES (?,?,?,?,?)")
-    .bind(memberId, input.email.trim().toLowerCase(), input.name.trim(), role, input.clientId || null).run();
-  await audit(db, "member", memberId, "Member added", actor, input.email);
+  await db.prepare("INSERT INTO members (id,email,name,role,client_id,invited_by,invited_at,updated_at) VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
+    .bind(memberId, email, name, role, clientId, actor.name).run();
+  await audit(db, "member", memberId, "Member invited", actor, email);
   return memberId;
 }
 
-export async function createProject(input: Record<string, string>, actor: Actor) {
-  requireStaff(actor);
+export async function updateMember(input: Record<string, string>, actor: Actor) {
   const db = await ensureDatabase();
+  const memberId = required(input, "memberId", "Member", 100);
+  const member = await db.prepare("SELECT id,email,role,client_id,active FROM members WHERE id = ?")
+    .bind(memberId).first<{ id: string; email: string; role: string; client_id: string | null; active: string }>();
+  if (!member) throw new AccessError("Member not found", 404);
+  if (actor.isStaff) {
+    requireRole(actor, ["agency_admin"], "Only an agency administrator can manage access");
+  } else if (!(actor.role === "client_admin" && actor.clientId === member.client_id && !isStaffRole(member.role))) {
+    throw new AccessError("You cannot manage this member");
+  }
+
+  const nextRole = input.role ? choice(input, "role", "Role", MEMBER_ROLES) : member.role;
+  const nextActive = input.active ? choice(input, "active", "Status", new Set(["0", "1"])) : member.active;
+  if (!actor.isStaff && isStaffRole(nextRole)) throw new AccessError("Client administrators cannot assign staff roles");
+  if (actor.id === member.id && (nextRole !== member.role || nextActive !== member.active)) {
+    throw new AccessError("You cannot change your own role or access status");
+  }
+  if (member.role === "agency_admin" && (nextRole !== "agency_admin" || nextActive !== "1")) {
+    const admins = await db.prepare("SELECT COUNT(*) AS count FROM members WHERE role = 'agency_admin' AND active = '1'").first<{ count: number }>();
+    if ((admins?.count || 0) <= 1) throw new AccessError("At least one active agency administrator is required");
+  }
+  if (member.role === "client_admin" && member.client_id && (nextRole !== "client_admin" || nextActive !== "1")) {
+    const admins = await db.prepare("SELECT COUNT(*) AS count FROM members WHERE client_id = ? AND role = 'client_admin' AND active = '1'")
+      .bind(member.client_id).first<{ count: number }>();
+    if ((admins?.count || 0) <= 1) throw new AccessError("Add another active client administrator before changing this account");
+  }
+  if (member.client_id && isStaffRole(nextRole)) throw new AccessError("Move staff accounts through the internal team, not a client workspace", 400);
+  if (!member.client_id && !isStaffRole(nextRole)) throw new AccessError("Internal accounts require an internal role", 400);
+
+  await enforceRateLimit(actor, "member:update", 120, 60);
+  await db.prepare("UPDATE members SET role = ?, active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    .bind(nextRole, nextActive, memberId).run();
+  await audit(db, "member", memberId, nextActive === "1" ? "Member access updated" : "Member access suspended", actor, `${member.email} - ${nextRole}`);
+}
+
+export async function createProject(input: Record<string, string>, actor: Actor) {
+  requireRole(actor, ["agency_admin", "project_manager"], "Only administrators and project managers can create projects");
+  const db = await ensureDatabase();
+  const clientId = required(input, "clientId", "Client", 100);
+  const client = await db.prepare("SELECT id FROM clients WHERE id = ?").bind(clientId).first<{ id: string }>();
+  if (!client) throw new AccessError("Client workspace not found", 404);
+  const name = required(input, "name", "Project name", 140);
+  const code = required(input, "code", "Project code", 8).toUpperCase();
+  if (!/^[A-Z0-9]{2,8}$/.test(code)) throw new AccessError("Project code must be 2-8 letters or numbers", 400);
+  const existingCode = await db.prepare("SELECT id FROM projects WHERE code = ?").bind(code).first<{ id: string }>();
+  if (existingCode) throw new AccessError("This project code is already in use", 409);
+  const manager = required(input, "manager", "Project lead", 120);
+  const description = optional(input, "description", 1000);
+  const stage = ["UAT", "Internal QA", "Live"].includes(input.stage) ? input.stage : "UAT";
+  const stagingUrl = safeUrl(input, "stagingUrl", "Staging URL");
+  await enforceRateLimit(actor, "project:create", 50, 60);
   const projectId = id("project");
   await db.prepare("INSERT INTO projects (id,client_id,name,code,description,manager,stage,staging_url) VALUES (?,?,?,?,?,?,?,?)")
-    .bind(projectId, input.clientId, input.name, input.code.toUpperCase(), input.description || "", input.manager, input.stage || "UAT", input.stagingUrl || "").run();
-  await audit(db, "project", projectId, "Project created", actor, input.name);
+    .bind(projectId, clientId, name, code, description, manager, stage, stagingUrl).run();
+  await audit(db, "project", projectId, "Project created", actor, name);
   return projectId;
 }
 
 export async function createRelease(input: Record<string, string> & { checklist?: string[] }, actor: Actor) {
-  requireStaff(actor);
+  requireRole(actor, ["agency_admin", "project_manager"], "Only administrators and project managers can create releases");
   const db = await ensureDatabase();
+  const projectId = required(input, "projectId", "Project", 100);
+  const project = await db.prepare("SELECT id FROM projects WHERE id = ?").bind(projectId).first<{ id: string }>();
+  if (!project) throw new AccessError("Project not found", 404);
+  const name = required(input, "name", "Release name", 160);
+  const version = required(input, "version", "Version", 40);
+  const build = required(input, "build", "Build", 80);
+  const startDate = required(input, "startDate", "Start date", 10);
+  const dueDate = required(input, "dueDate", "Due date", 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(dueDate) || dueDate < startDate) {
+    throw new AccessError("Choose a valid testing window", 400);
+  }
+  const testingNotes = optional(input, "testingNotes", 3000);
+  const checklist = (input.checklist || []).map((item) => item.trim()).filter(Boolean);
+  if (checklist.length > 50 || checklist.some((item) => item.length > 180)) throw new AccessError("Use up to 50 checklist items of 180 characters each", 400);
+  await enforceRateLimit(actor, "release:create", 50, 60);
   const releaseId = id("release");
   await db.prepare("INSERT INTO releases (id,project_id,name,version,build,status,start_date,due_date,testing_notes) VALUES (?,?,?,?,?,?,?,?,?)")
-    .bind(releaseId, input.projectId, input.name, input.version, input.build, "Preparing", input.startDate, input.dueDate, input.testingNotes || "").run();
-  for (const title of input.checklist || []) {
-    if (title.trim()) await db.prepare("INSERT INTO checklist_items (id,release_id,title,state) VALUES (?,?,?,?)").bind(id("check"), releaseId, title.trim(), "Not tested").run();
+    .bind(releaseId, projectId, name, version, build, "Preparing", startDate, dueDate, testingNotes).run();
+  for (const title of checklist) {
+    await db.prepare("INSERT INTO checklist_items (id,release_id,title,state) VALUES (?,?,?,?)").bind(id("check"), releaseId, title, "Not tested").run();
   }
-  await audit(db, "release", releaseId, "Release created", actor, input.name);
+  await audit(db, "release", releaseId, "Release created", actor, name);
   return releaseId;
 }
 
 export async function createTicket(input: Record<string, string>, actor: Actor) {
   const db = await ensureDatabase();
-  if (!actor.isStaff && !["client_admin", "client_tester"].includes(actor.role)) {
-    throw new AccessError("Your role has read-only access");
+  if (!canSubmitFeedback(actor)) throw new AccessError("Your role has read-only access");
+  const projectId = required(input, "projectId", "Project", 100);
+  const releaseId = required(input, "releaseId", "Release", 100);
+  await assertProjectAccess(db, actor, projectId);
+  await assertReleaseAccess(db, actor, releaseId);
+  const release = await db.prepare("SELECT project_id FROM releases WHERE id = ?").bind(releaseId).first<{ project_id: string }>();
+  if (release?.project_id !== projectId) throw new AccessError("The selected release does not belong to this project", 400);
+  const type = choice(input, "type", "Feedback type", TICKET_TYPES);
+  const severity = choice(input, "severity", "Severity", SEVERITIES);
+  const title = required(input, "title", "Title", 180);
+  const actual = required(input, "actual", "Observed result", 5000);
+  const expected = required(input, "expected", "Expected result", 5000);
+  const pageUrl = safeUrl(input, "pageUrl", "Page URL");
+  const browser = optional(input, "browser", 500);
+  const viewport = optional(input, "viewport", 80);
+  const build = optional(input, "build", 80);
+  const attachmentKey = optional(input, "attachmentKey", 100) || null;
+  if (attachmentKey && !/^[a-f0-9-]+\.(png|jpg|webp|gif)$/i.test(attachmentKey)) throw new AccessError("Invalid screenshot reference", 400);
+  if (attachmentKey) {
+    const upload = await getUploads().head(attachmentKey);
+    if (!upload) throw new AccessError("Screenshot was not found", 400);
+    const uploadedBy = upload.customMetadata?.uploadedBy;
+    if (uploadedBy && uploadedBy !== actor.id) throw new AccessError("Screenshot belongs to another member");
   }
-  await assertProjectAccess(db, actor, input.projectId);
-  await assertReleaseAccess(db, actor, input.releaseId);
-  const release = await db.prepare("SELECT project_id FROM releases WHERE id = ?").bind(input.releaseId).first<{ project_id: string }>();
-  if (release?.project_id !== input.projectId) throw new AccessError("The selected release does not belong to this project", 400);
-  const project = await db.prepare("SELECT code FROM projects WHERE id = ?").bind(input.projectId).first<{ code: string }>();
-  const existing = await db.prepare("SELECT key FROM tickets WHERE project_id = ?").bind(input.projectId).all<{ key: string }>();
+  await enforceRateLimit(actor, "feedback:create", 20, 60);
+  const project = await db.prepare("SELECT code FROM projects WHERE id = ?").bind(projectId).first<{ code: string }>();
+  const existing = await db.prepare("SELECT key FROM tickets WHERE project_id = ?").bind(projectId).all<{ key: string }>();
   const nextNumber = existing.results.reduce((largest, row) => {
     const suffix = Number(row.key.split("-").pop());
     return Number.isFinite(suffix) ? Math.max(largest, suffix) : largest;
@@ -336,26 +518,35 @@ export async function createTicket(input: Record<string, string>, actor: Actor) 
   await db.prepare(`INSERT INTO tickets
     (id,key,project_id,release_id,type,title,actual,expected,severity,priority,status,reporter,assignee,page_url,browser,viewport,build,attachment_key)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .bind(ticketId, key, input.projectId, input.releaseId, input.type, input.title, input.actual, input.expected, input.severity, "Normal", "Submitted", actor.name, "Unassigned", input.pageUrl || "", input.browser || "", input.viewport || "", input.build || "", input.attachmentKey || null).run();
+    .bind(ticketId, key, projectId, releaseId, type, title, actual, expected, severity, "Normal", "Submitted", actor.name, "Unassigned", pageUrl, browser, viewport, build, attachmentKey).run();
   await audit(db, "ticket", ticketId, "Feedback submitted", actor, key);
   return { ticketId, key };
 }
 
 export async function updateTicket(input: Record<string, string>, actor: Actor) {
   const db = await ensureDatabase();
-  await assertTicketAccess(db, actor, input.ticketId);
+  const ticketId = required(input, "ticketId", "Feedback", 100);
+  await assertTicketAccess(db, actor, ticketId);
   const allowed = new Map([["status", "status"], ["priority", "priority"], ["assignee", "assignee"], ["type", "type"], ["severity", "severity"]]);
-  const column = allowed.get(input.field);
-  if (!column) throw new Error("Unsupported ticket update");
+  const field = required(input, "field", "Field", 40);
+  const column = allowed.get(field);
+  if (!column) throw new AccessError("Unsupported feedback update", 400);
+  let value = required(input, "value", "Value", 120);
+  if (field === "status" && !TICKET_STATUSES.has(value)) throw new AccessError("Choose a valid status", 400);
+  if (field === "priority" && !PRIORITIES.has(value)) throw new AccessError("Choose a valid priority", 400);
+  if (field === "type" && !TICKET_TYPES.has(value)) throw new AccessError("Choose a valid feedback type", 400);
+  if (field === "severity" && !SEVERITIES.has(value)) throw new AccessError("Choose a valid severity", 400);
+  if (field === "assignee") value = value.slice(0, 120);
   if (!actor.isStaff) {
     if (!["client_admin", "client_tester"].includes(actor.role)) throw new AccessError("Your role has read-only access");
-    const current = await db.prepare("SELECT status FROM tickets WHERE id = ?").bind(input.ticketId).first<{ status: string }>();
-    if (input.field !== "status" || !["Verified", "Reopened"].includes(input.value) || current?.status !== "Ready for retest") {
+    const current = await db.prepare("SELECT status FROM tickets WHERE id = ?").bind(ticketId).first<{ status: string }>();
+    if (field !== "status" || !["Verified", "Reopened"].includes(value) || current?.status !== "Ready for retest") {
       throw new AccessError("Clients can only verify or reopen feedback that is ready for retest");
     }
   }
-  await db.prepare(`UPDATE tickets SET ${column} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(input.value, input.ticketId).run();
-  await audit(db, "ticket", input.ticketId, `${input.field} changed`, actor, input.value);
+  await enforceRateLimit(actor, "feedback:update", 120, 60);
+  await db.prepare(`UPDATE tickets SET ${column} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(value, ticketId).run();
+  await audit(db, "ticket", ticketId, `${field} changed`, actor, value);
 }
 
 export async function addComment(input: Record<string, string>, actor: Actor) {
@@ -363,39 +554,47 @@ export async function addComment(input: Record<string, string>, actor: Actor) {
   if (!actor.isStaff && !["client_admin", "client_tester"].includes(actor.role)) {
     throw new AccessError("Your role has read-only access");
   }
-  await assertTicketAccess(db, actor, input.ticketId);
+  const ticketId = required(input, "ticketId", "Feedback", 100);
+  const body = required(input, "body", "Comment", 5000);
+  await assertTicketAccess(db, actor, ticketId);
+  await enforceRateLimit(actor, "comment:create", 60, 60);
   const visibility = actor.isStaff && input.visibility === "internal" ? "internal" : "public";
   await db.prepare("INSERT INTO comments (id,ticket_id,author,body,visibility) VALUES (?,?,?,?,?)")
-    .bind(id("comment"), input.ticketId, actor.name, input.body, visibility).run();
-  await db.prepare("UPDATE tickets SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(input.ticketId).run();
-  await audit(db, "ticket", input.ticketId, visibility === "internal" ? "Internal note added" : "Reply sent", actor);
+    .bind(id("comment"), ticketId, actor.name, body, visibility).run();
+  await db.prepare("UPDATE tickets SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(ticketId).run();
+  await audit(db, "ticket", ticketId, visibility === "internal" ? "Internal note added" : "Reply sent", actor);
 }
 
 export async function updateChecklist(input: Record<string, string>, actor: Actor) {
   const db = await ensureDatabase();
-  const item = await db.prepare("SELECT release_id FROM checklist_items WHERE id = ?").bind(input.itemId).first<{ release_id: string }>();
+  const itemId = required(input, "itemId", "Checklist item", 100);
+  const state = choice(input, "state", "Checklist state", CHECK_STATES);
+  const item = await db.prepare("SELECT release_id FROM checklist_items WHERE id = ?").bind(itemId).first<{ release_id: string }>();
   if (!item) throw new AccessError("Checklist item not found", 404);
   await assertReleaseAccess(db, actor, item.release_id);
   if (!actor.isStaff && !["client_admin", "client_tester"].includes(actor.role)) throw new AccessError("Your role cannot update acceptance checks");
-  await db.prepare("UPDATE checklist_items SET state = ? WHERE id = ?").bind(input.state, input.itemId).run();
-  await audit(db, "checklist", input.itemId, "Checklist updated", actor, input.state);
+  await enforceRateLimit(actor, "checklist:update", 120, 60);
+  await db.prepare("UPDATE checklist_items SET state = ? WHERE id = ?").bind(state, itemId).run();
+  await audit(db, "checklist", itemId, "Checklist updated", actor, state);
 }
 
 export async function approveRelease(input: Record<string, string>, actor: Actor) {
   const db = await ensureDatabase();
-  await assertReleaseAccess(db, actor, input.releaseId);
-  if (!actor.isStaff && actor.role !== "client_admin") throw new AccessError("Only a client administrator can approve a release");
+  const releaseId = required(input, "releaseId", "Release", 100);
+  await assertReleaseAccess(db, actor, releaseId);
+  requireRole(actor, ["agency_admin", "project_manager", "client_admin"], "Only an authorised administrator can approve a release");
   const blockers = await db.prepare(`SELECT COUNT(*) AS count FROM tickets
     WHERE release_id = ? AND severity IN ('Critical','High')
     AND status NOT IN ('Verified','Closed','Deferred','Rejected / out of scope')`)
-    .bind(input.releaseId).first<{ count: number }>();
+    .bind(releaseId).first<{ count: number }>();
   const incomplete = await db.prepare("SELECT COUNT(*) AS count FROM checklist_items WHERE release_id = ? AND state != 'Passed'")
-    .bind(input.releaseId).first<{ count: number }>();
+    .bind(releaseId).first<{ count: number }>();
   if ((blockers?.count || 0) > 0 || (incomplete?.count || 0) > 0) {
-    throw new Error("Resolve blocking feedback and pass every acceptance item before approval");
+    throw new AccessError("Resolve blocking feedback and pass every acceptance item before approval", 409);
   }
-  await db.prepare("UPDATE releases SET status = 'Approved', approved_at = CURRENT_TIMESTAMP, approved_by = ? WHERE id = ?").bind(actor.name, input.releaseId).run();
-  await audit(db, "release", input.releaseId, "Release approved", actor, input.exceptions || "No exceptions");
+  await enforceRateLimit(actor, "release:approve", 10, 60);
+  await db.prepare("UPDATE releases SET status = 'Approved', approved_at = CURRENT_TIMESTAMP, approved_by = ? WHERE id = ?").bind(actor.name, releaseId).run();
+  await audit(db, "release", releaseId, "Release approved", actor, optional(input, "exceptions", 1000) || "No exceptions");
 }
 
 export async function canAccessAttachment(key: string, actor: Actor) {

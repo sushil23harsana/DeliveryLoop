@@ -24,8 +24,8 @@ export async function generateMetadata(): Promise<Metadata> {
     metadataBase: base,
     title,
     description,
-    openGraph: { title, description, type: "website", images: [{ url: new URL("/og-v2.png", base).toString(), width: 1672, height: 941, alt: "DeliveryLoop client delivery workflow" }] },
-    twitter: { card: "summary_large_image", title, description, images: [new URL("/og-v2.png", base).toString()] },
+    openGraph: { title, description, type: "website", images: [{ url: new URL("/og-v3.png", base).toString(), width: 1672, height: 941, alt: "DeliveryLoop secure client delivery workflow" }] },
+    twitter: { card: "summary_large_image", title, description, images: [new URL("/og-v3.png", base).toString()] },
   };
 }
 

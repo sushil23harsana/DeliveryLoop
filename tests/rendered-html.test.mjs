@@ -30,6 +30,28 @@ test("includes deployment output, migrations, and the social card", async () => 
     access(new URL("../dist/server/index.js", import.meta.url)),
     access(new URL("../drizzle/0000_luxuriant_karma.sql", import.meta.url)),
     access(new URL("../drizzle/0001_calm_stellaris.sql", import.meta.url)),
-    access(new URL("../public/og-v2.png", import.meta.url)),
+    access(new URL("../drizzle/0002_majestic_martin_li.sql", import.meta.url)),
+    access(new URL("../drizzle/0003_complex_sharon_ventura.sql", import.meta.url)),
+    access(new URL("../public/og-v3.png", import.meta.url)),
   ]);
+});
+
+test("keeps authentication and authorisation server-enforced", async () => {
+  const [workspace, http, uploads, envExample] = await Promise.all([
+    readFile(new URL("../db/workspace.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/http.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/uploads/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../.env.example", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(workspace, /BOOTSTRAP_ADMIN_EMAIL/);
+  assert.doesNotMatch(workspace, /realAdmins/);
+  assert.match(workspace, /updateMember/);
+  assert.match(workspace, /enforceRateLimit/);
+  assert.match(workspace, /You cannot change your own role or access status/);
+  assert.match(http, /Cross-origin request rejected/);
+  assert.match(http, /Cache-Control/);
+  assert.match(uploads, /hasValidSignature/);
+  assert.match(uploads, /uploadedBy/);
+  assert.match(envExample, /BOOTSTRAP_ADMIN_EMAIL/);
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import {
   Activity,
   AlertCircle,
@@ -13,8 +13,8 @@ import {
   Check,
   CheckCircle2,
   ChevronRight,
-  Circle,
   Clock3,
+  Copy,
   Download,
   ExternalLink,
   Eye,
@@ -22,8 +22,8 @@ import {
   FolderKanban,
   Inbox,
   LayoutDashboard,
-  ListChecks,
   LockKeyhole,
+  Mail,
   MessageCircleQuestion,
   MessageSquareWarning,
   MonitorSmartphone,
@@ -33,16 +33,19 @@ import {
   RefreshCcw,
   Search,
   Send,
+  Settings2,
   ShieldCheck,
   Type,
   UploadCloud,
   UserPlus,
+  UserCheck,
+  UserX,
   Users,
   X,
 } from "lucide-react";
 
 type Client = { id: string; name: string; contact_name: string; contact_email: string; accent: string; created_at: string };
-type Member = { id: string; email: string; name: string; role: string; client_id: string | null; active: string; created_at: string };
+type Member = { id: string; email: string; name: string; role: string; client_id: string | null; active: string; invited_by: string; invited_at: string | null; last_seen_at: string | null; updated_at: string | null; created_at: string };
 type Project = { id: string; client_id: string; name: string; code: string; description: string; manager: string; stage: string; staging_url: string; created_at: string };
 type Release = { id: string; project_id: string; name: string; version: string; build: string; status: string; start_date: string; due_date: string; testing_notes: string; approved_at: string | null; approved_by: string | null; created_at: string };
 type ChecklistItem = { id: string; release_id: string; title: string; state: string; created_at: string };
@@ -51,12 +54,12 @@ type Comment = { id: string; ticket_id: string; author: string; body: string; vi
 type AuditEvent = { id: string; entity_type: string; entity_id: string; action: string; actor: string; details: string; created_at: string };
 type Actor = { id: string; email: string; name: string; role: string; clientId: string | null; isStaff: boolean };
 type Workspace = { clients: Client[]; members: Member[]; projects: Project[]; releases: Release[]; checklist: ChecklistItem[]; tickets: Ticket[]; comments: Comment[]; audit: AuditEvent[] };
-type View = "overview" | "projects" | "releases" | "feedback" | "clients" | "reports";
+type View = "overview" | "projects" | "releases" | "feedback" | "clients" | "reports" | "settings";
 type Modal = "feedback" | "project" | "release" | "client" | "member" | null;
 type ActionPayload = Record<string, string | string[]>;
 
 const closedStatuses = new Set(["Verified", "Closed", "Deferred", "Rejected / out of scope"]);
-const statusOptions = ["Submitted", "Triaged", "In progress", "Needs information", "Approval required", "Ready for retest", "Verified", "Closed", "Deferred", "Rejected / out of scope"];
+const statusOptions = ["Submitted", "Triaged", "In progress", "Needs information", "Approval required", "Ready for retest", "Reopened", "Verified", "Closed", "Deferred", "Rejected / out of scope"];
 const people = ["Unassigned", "Aarav Patel", "Neha Kapoor", "Kabir Shah", "Dev Malhotra", "Isha Verma", "Sana Ali"];
 
 const staffNavigation = [
@@ -66,6 +69,7 @@ const staffNavigation = [
   { id: "feedback" as View, label: "Feedback", icon: MessageSquareWarning },
   { id: "clients" as View, label: "Clients & access", icon: Building2 },
   { id: "reports" as View, label: "Reports", icon: BarChart3 },
+  { id: "settings" as View, label: "Team & security", icon: Settings2 },
 ];
 
 const clientNavigation = [
@@ -115,12 +119,12 @@ function scopeWorkspace(data: Workspace, clientId: string | null): Workspace {
   };
 }
 
-function feedbackIcon(type: string) {
-  if (type === "Bug") return Bug;
-  if (type === "Change request") return RefreshCcw;
-  if (type === "Content") return Type;
-  return MessageCircleQuestion;
-}
+const feedbackIcons: Record<string, typeof Bug> = {
+  Bug,
+  "Change request": RefreshCcw,
+  Content: Type,
+  Question: MessageCircleQuestion,
+};
 
 export function DeliveryLoopApp() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
@@ -152,7 +156,10 @@ export function DeliveryLoopApp() {
   }
 
   useEffect(() => {
-    load().catch((error) => setAccessError({ status: 500, message: error instanceof Error ? error.message : "Unable to load workspace" }));
+    const timer = window.setTimeout(() => {
+      load().catch((error) => setAccessError({ status: 500, message: error instanceof Error ? error.message : "Unable to load workspace" }));
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   function notify(message: string) {
@@ -195,6 +202,8 @@ export function DeliveryLoopApp() {
   const testingReleases = data.releases.filter((release) => ["Testing", "Retest"].includes(release.status));
   const canReport = actor.isStaff || ["client_admin", "client_tester"].includes(actor.role);
   const canManageClientMembers = !actor.isStaff && actor.role === "client_admin";
+  const canManageClients = actor.role === "agency_admin";
+  const canManageDelivery = actor.role === "agency_admin" || actor.role === "project_manager";
   const navigation = isClientView ? [...clientNavigation, ...(canManageClientMembers ? [clientAdminNavigation] : [])] : staffNavigation;
 
   const visibleTickets = data.tickets.filter((ticket) => {
@@ -271,9 +280,10 @@ export function DeliveryLoopApp() {
           </div>
           <div className="top-actions">
             {previewClientId ? <button className="quiet-button" onClick={() => changePreview("")}><X size={15} /> Exit preview</button> : null}
-            {!isClientView && view === "projects" ? <button className="secondary-button" onClick={() => setModal("project")}><Plus size={15} /> New project</button> : null}
-            {!isClientView && view === "clients" ? <button className="secondary-button" onClick={() => setModal("client")}><Plus size={15} /> New client</button> : null}
-            {!isClientView && view === "releases" ? <button className="primary-button" onClick={() => setModal("release")}><Plus size={15} /> New release</button> : null}
+            {!isClientView && view === "projects" && canManageDelivery ? <button className="secondary-button" onClick={() => setModal("project")}><Plus size={15} /> New project</button> : null}
+            {!isClientView && view === "clients" && canManageClients ? <button className="secondary-button" onClick={() => setModal("client")}><Plus size={15} /> New client</button> : null}
+            {!isClientView && view === "releases" && canManageDelivery ? <button className="primary-button" onClick={() => setModal("release")}><Plus size={15} /> New release</button> : null}
+            {!isClientView && view === "settings" && canManageClients ? <button className="secondary-button" onClick={() => openMemberModal("agency")}><UserPlus size={15} /> Add teammate</button> : null}
             {(view === "feedback" || isClientView) && canReport ? <button className="primary-button" onClick={() => setModal("feedback")}><Plus size={15} /> Report feedback</button> : null}
           </div>
         </header>
@@ -284,8 +294,9 @@ export function DeliveryLoopApp() {
         {view === "projects" ? <Projects data={data} isClientView={isClientView} clientById={clientById} setView={setView} setSelectedReleaseId={setSelectedReleaseId} /> : null}
         {view === "releases" ? <Releases data={data} actor={actor} isClientView={isClientView} selectedRelease={selectedRelease} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} runAction={runAction} busy={busy} /> : null}
         {view === "feedback" ? <Feedback data={data} tickets={visibleTickets} query={query} setQuery={setQuery} statusFilter={statusFilter} setStatusFilter={setStatusFilter} setSelectedTicketId={setSelectedTicketId} /> : null}
-        {view === "clients" && (!isClientView || canManageClientMembers) ? <Clients data={data} openMemberModal={openMemberModal} /> : null}
+        {view === "clients" && (!isClientView || canManageClientMembers) ? <Clients data={data} actor={actor} openMemberModal={openMemberModal} runAction={runAction} busy={busy} notify={notify} /> : null}
         {view === "reports" && !isClientView ? <Reports data={data} /> : null}
+        {view === "settings" && !isClientView ? <Settings data={data} actor={actor} openMemberModal={openMemberModal} runAction={runAction} busy={busy} notify={notify} /> : null}
       </main>
 
       {selectedTicket ? (
@@ -300,8 +311,8 @@ export function DeliveryLoopApp() {
 }
 
 function pageTitle(view: View, isClientView: boolean) {
-  if (isClientView) return ({ releases: "Release testing", feedback: "Feedback and retesting", projects: "Project details", overview: "Overview", clients: "Access", reports: "Reports" } as Record<View, string>)[view];
-  return ({ overview: "Delivery overview", projects: "Projects", releases: "Release centre", feedback: "Feedback inbox", clients: "Clients and access", reports: "UAT reporting" } as Record<View, string>)[view];
+  if (isClientView) return ({ releases: "Release testing", feedback: "Feedback and retesting", projects: "Project details", overview: "Overview", clients: "Access", reports: "Reports", settings: "Settings" } as Record<View, string>)[view];
+  return ({ overview: "Delivery overview", projects: "Projects", releases: "Release centre", feedback: "Feedback inbox", clients: "Clients and access", reports: "UAT reporting", settings: "Team and security" } as Record<View, string>)[view];
 }
 
 function LoadingScreen() {
@@ -380,7 +391,7 @@ function Releases({ data, actor, isClientView, selectedRelease, setSelectedRelea
   const blockers = open.filter((ticket) => ["Critical", "High"].includes(ticket.severity));
   const incomplete = checks.filter((item) => item.state !== "Passed");
   const canApprove = blockers.length === 0 && incomplete.length === 0 && selectedRelease.status !== "Approved";
-  const canSign = actor.isStaff || actor.role === "client_admin";
+  const canSign = ["agency_admin", "project_manager", "client_admin"].includes(actor.role);
   const canTest = actor.isStaff || ["client_admin", "client_tester"].includes(actor.role);
   const cycle = (state: string) => state === "Not tested" ? "Passed" : state === "Passed" ? "Failed" : "Not tested";
   return <div className="page-content release-page">
@@ -406,16 +417,75 @@ function Feedback({ data, tickets, query, setQuery, statusFilter, setStatusFilte
 
 function FeedbackTable({ tickets, projects, onOpen, compact = false }: { tickets: Ticket[]; projects: Project[]; onOpen: (id: string) => void; compact?: boolean }) {
   return <div className={`feedback-table ${compact ? "compact" : ""}`}><div className="feedback-head"><span>Feedback</span><span>Project</span><span>Status</span><span>Priority</span><span>Owner</span></div>{tickets.length ? tickets.map((ticket) => {
-    const project = projects.find((item) => item.id === ticket.project_id); const Icon = feedbackIcon(ticket.type);
+    const project = projects.find((item) => item.id === ticket.project_id); const Icon = feedbackIcons[ticket.type] || MessageCircleQuestion;
     return <button className="feedback-row" key={ticket.id} onClick={() => onOpen(ticket.id)}><span className="feedback-title"><i className={`feedback-type ${ticket.type.toLowerCase().replace(" ", "-")}`}><Icon size={15} /></i><span><b>{ticket.title}</b><small>{ticket.key} · {ticket.reporter}</small></span></span><span className="project-reference"><b>{project?.code}</b><small>{project?.name}</small></span><StatusBadge value={ticket.status} /><span className={`priority-label ${ticket.priority.toLowerCase()}`}>{ticket.priority}</span><span className="owner-cell"><i>{initials(ticket.assignee)}</i>{ticket.assignee}</span></button>;
   }) : <EmptyState icon={Inbox} title="No feedback in this view" body="Change the filters or report a new issue." />}</div>;
 }
 
-function Clients({ data, openMemberModal }: { data: Workspace; openMemberModal: (clientId: string) => void }) {
-  return <div className="page-content client-page"><div className="access-intro surface"><div><ShieldCheck size={19} /><span><p>Tenant-aware access</p><h2>Each client only sees their own projects, releases and public conversations.</h2></span></div><small>Members sign in with the exact email registered below.</small></div><div className="client-list">{data.clients.map((client) => {
-    const projects = data.projects.filter((project) => project.client_id === client.id); const members = data.members.filter((member) => member.client_id === client.id && member.active === "1"); const tickets = data.tickets.filter((ticket) => projects.some((project) => project.id === ticket.project_id));
-    return <article className="surface client-access-card" key={client.id}><header><span style={{ background: client.accent }}>{initials(client.name)}</span><div><h2>{client.name}</h2><p>{client.contact_name} · {client.contact_email}</p></div><button className="secondary-button" onClick={() => openMemberModal(client.id)}><UserPlus size={15} /> Add member</button></header><div className="client-stats"><div><span>Projects</span><b>{projects.length}</b></div><div><span>Open feedback</span><b>{tickets.filter((ticket) => !closedStatuses.has(ticket.status)).length}</b></div><div><span>Active members</span><b>{members.length}</b></div></div><div className="member-list"><div className="member-head"><span>Member</span><span>Role</span><span>Status</span></div>{members.map((member) => <div key={member.id}><span className="member-person"><i>{initials(member.name)}</i><span><b>{member.name}</b><small>{member.email}</small></span></span><span>{roleLabel(member.role)}</span><span className="active-status"><i /> Active</span></div>)}</div></article>;
-  })}</div></div>;
+function Clients({ data, actor, openMemberModal, runAction, busy, notify }: { data: Workspace; actor: Actor; openMemberModal: (clientId: string) => void; runAction: (action: string, payload: ActionPayload, success: string) => Promise<void>; busy: boolean; notify: (message: string) => void }) {
+  return <div className="page-content client-page">
+    <div className="access-intro surface"><div><ShieldCheck size={19} /><span><p>Tenant-aware access</p><h2>Every client is isolated to its own releases, feedback and public conversations.</h2></span></div><small>Access is matched to the exact ChatGPT account email invited here.</small></div>
+    <div className="client-list">{data.clients.map((client) => {
+      const projects = data.projects.filter((project) => project.client_id === client.id);
+      const members = data.members.filter((member) => member.client_id === client.id);
+      const tickets = data.tickets.filter((ticket) => projects.some((project) => project.id === ticket.project_id));
+      return <article className="surface client-access-card" key={client.id}>
+        <header><span style={{ background: client.accent }}>{initials(client.name)}</span><div><h2>{client.name}</h2><p>{client.contact_name} · {client.contact_email}</p></div>{["agency_admin", "client_admin"].includes(actor.role) ? <button className="secondary-button" onClick={() => openMemberModal(client.id)}><UserPlus size={15} /> Invite member</button> : null}</header>
+        <div className="client-stats"><div><span>Projects</span><b>{projects.length}</b></div><div><span>Open feedback</span><b>{tickets.filter((ticket) => !closedStatuses.has(ticket.status)).length}</b></div><div><span>Active members</span><b>{members.filter((member) => member.active === "1").length}</b></div></div>
+        <MemberDirectory members={members} actor={actor} runAction={runAction} busy={busy} notify={notify} />
+      </article>;
+    })}</div>
+  </div>;
+}
+
+function Settings({ data, actor, openMemberModal, runAction, busy, notify }: { data: Workspace; actor: Actor; openMemberModal: (clientId: string) => void; runAction: (action: string, payload: ActionPayload, success: string) => Promise<void>; busy: boolean; notify: (message: string) => void }) {
+  const staff = data.members.filter((member) => !member.client_id && ["agency_admin", "project_manager", "developer"].includes(member.role));
+  const activeClientMembers = data.members.filter((member) => member.client_id && member.active === "1").length;
+  const clientAdmins = new Set(data.members.filter((member) => member.role === "client_admin" && member.active === "1").map((member) => member.client_id));
+  return <div className="page-content settings-page">
+    <section className="security-grid">
+      <article className="surface security-card"><ShieldCheck size={19} /><div><p>Authentication</p><h2>Sign in with ChatGPT</h2><small>Identity is verified by the hosting platform. DeliveryLoop only grants access to invited emails.</small></div><span className="security-state"><i /> Enforced</span></article>
+      <article className="surface security-card"><LockKeyhole size={19} /><div><p>Authorisation</p><h2>Role and tenant controls</h2><small>Every server request checks the member role and client workspace before reading or changing data.</small></div><span className="security-state"><i /> Enforced</span></article>
+      <article className="surface security-card"><Activity size={19} /><div><p>Protection</p><h2>Rate limits and audit trail</h2><small>Write actions are throttled and sensitive changes are attributed to the signed-in member.</small></div><span className="security-state"><i /> Active</span></article>
+    </section>
+    <section className="settings-grid">
+      <article className="surface internal-team"><header className="section-header"><div><p>Agency workspace</p><h2>Internal delivery team</h2></div>{actor.role === "agency_admin" ? <button className="secondary-button" onClick={() => openMemberModal("agency")}><UserPlus size={15} /> Add teammate</button> : null}</header><MemberDirectory members={staff} actor={actor} runAction={runAction} busy={busy} notify={notify} /></article>
+      <aside className="surface readiness-card"><header><p>Access readiness</p><h2>Client onboarding</h2></header><div className="readiness-number">{activeClientMembers}<span>active client members</span></div><div className="readiness-list"><div><CheckCircle2 size={15} /><span><b>Owner identity secured</b><small>{actor.email}</small></span></div><div><CheckCircle2 size={15} /><span><b>{data.clients.length} client workspaces isolated</b><small>API and attachment access checked server-side</small></span></div><div className={clientAdmins.size === data.clients.length ? "" : "pending"}><AlertCircle size={15} /><span><b>{clientAdmins.size} of {data.clients.length} clients have an admin</b><small>Add one client admin before handing over each portal.</small></span></div></div></aside>
+    </section>
+  </div>;
+}
+
+function MemberDirectory({ members, actor, runAction, busy, notify }: { members: Member[]; actor: Actor; runAction: (action: string, payload: ActionPayload, success: string) => Promise<void>; busy: boolean; notify: (message: string) => void }) {
+  async function copyAccessLink(member: Member) {
+    const link = `${window.location.origin}/signin-with-chatgpt?return_to=%2F`;
+    try {
+      await navigator.clipboard.writeText(link);
+      notify(`Sign-in link copied for ${member.name}`);
+    } catch {
+      notify("Could not copy the link. Open the sign-in page and copy it from the address bar.");
+    }
+  }
+  function emailInvite(member: Member) {
+    const link = `${window.location.origin}/signin-with-chatgpt?return_to=%2F`;
+    const subject = "Your DeliveryLoop access";
+    const body = `Hi ${member.name},\n\nYou have been invited to DeliveryLoop. Sign in with the ChatGPT account that uses ${member.email}:\n\n${link}\n\nThanks`;
+    window.location.href = `mailto:${encodeURIComponent(member.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  }
+  if (!members.length) return <div className="member-empty"><Users size={18} /><span><b>No members yet</b><small>Invite the first person who should have access.</small></span></div>;
+  return <div className="member-list managed-members">
+    <div className="member-head"><span>Member</span><span>Role</span><span>Activity</span><span>Access</span><span>Invite</span></div>
+    {members.map((member) => {
+      const isSelf = member.id === actor.id;
+      const roles = member.client_id ? [["client_admin", "Client admin"], ["client_tester", "Client tester"], ["client_viewer", "Client viewer"]] : [["agency_admin", "Agency admin"], ["project_manager", "Project manager"], ["developer", "Developer"]];
+      return <div key={member.id} className={member.active === "1" ? "" : "member-suspended"}>
+        <span className="member-person"><i>{initials(member.name)}</i><span><b>{member.name}{isSelf ? <em>You</em> : null}</b><small>{member.email}</small></span></span>
+        <select aria-label={`Role for ${member.name}`} value={member.role} disabled={busy || isSelf || actor.role !== "agency_admin" && actor.role !== "client_admin"} onChange={(event) => runAction("updateMember", { memberId: member.id, role: event.target.value }, `Role updated for ${member.name}`)}>{roles.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
+        <span className="member-activity"><Clock3 size={13} />{member.last_seen_at ? `Seen ${formatDate(member.last_seen_at)}` : `Invited ${formatDate(member.invited_at || member.created_at)}`}</span>
+        <button className={member.active === "1" ? "access-toggle active" : "access-toggle"} disabled={busy || isSelf || actor.role !== "agency_admin" && actor.role !== "client_admin"} onClick={() => runAction("updateMember", { memberId: member.id, active: member.active === "1" ? "0" : "1" }, member.active === "1" ? `Access suspended for ${member.name}` : `Access restored for ${member.name}`)}>{member.active === "1" ? <><UserCheck size={14} /> Active</> : <><UserX size={14} /> Suspended</>}</button>
+        <span className="member-invite-actions"><button onClick={() => copyAccessLink(member)} aria-label={`Copy sign-in link for ${member.name}`} title="Copy sign-in link"><Copy size={14} /></button><button onClick={() => emailInvite(member)} aria-label={`Email ${member.name}`} title="Prepare invite email" disabled={member.active !== "1"}><Mail size={14} /></button></span>
+      </div>;
+    })}
+  </div>;
 }
 
 function Reports({ data }: { data: Workspace }) {
@@ -431,11 +501,12 @@ function FeedbackDrawer({ ticket, project, release, comments, isClientView, canR
 }
 
 function ActionModal({ modal, data, isClientView, selectedRelease, memberClientId, close, runAction, busy, notify }: { modal: Exclude<Modal, null>; data: Workspace; isClientView: boolean; selectedRelease?: Release; memberClientId: string | null; close: () => void; runAction: (action: string, payload: ActionPayload, success: string) => Promise<void>; busy: boolean; notify: (message: string) => void }) {
+  const isAgencyMember = modal === "member" && memberClientId === "agency";
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = new FormData(event.currentTarget);
     try {
       if (modal === "client") return runAction("createClient", { name: field(form, "name"), contactName: field(form, "contactName"), contactEmail: field(form, "contactEmail"), accent: field(form, "accent") }, "Client workspace created");
-      if (modal === "member") return runAction("createMember", { clientId: memberClientId || field(form, "clientId"), name: field(form, "name"), email: field(form, "email"), role: field(form, "role") }, "Member access added");
+      if (modal === "member") return runAction("createMember", { clientId: isAgencyMember ? "" : memberClientId || field(form, "clientId"), name: field(form, "name"), email: field(form, "email"), role: field(form, "role") }, "Invitation prepared");
       if (modal === "project") return runAction("createProject", { clientId: field(form, "clientId"), name: field(form, "name"), code: field(form, "code"), description: field(form, "description"), manager: field(form, "manager"), stage: "UAT", stagingUrl: field(form, "stagingUrl") }, "Project created");
       if (modal === "release") return runAction("createRelease", { projectId: field(form, "projectId"), name: field(form, "name"), version: field(form, "version"), build: field(form, "build"), startDate: field(form, "startDate"), dueDate: field(form, "dueDate"), testingNotes: field(form, "testingNotes"), checklist: field(form, "checklist").split("\n").filter(Boolean) }, "Release prepared");
       const file = form.get("screenshot"); let attachmentKey = "";
@@ -447,12 +518,12 @@ function ActionModal({ modal, data, isClientView, selectedRelease, memberClientI
       notify(error instanceof Error ? error.message : "Unable to save");
     }
   }
-  const title = ({ feedback: "Report feedback", project: "Create project", release: "Prepare release", client: "Create client workspace", member: "Add workspace member" } as Record<Exclude<Modal, null>, string>)[modal];
+  const title = modal === "member" && isAgencyMember ? "Add internal teammate" : ({ feedback: "Report feedback", project: "Create project", release: "Prepare release", client: "Create client workspace", member: "Invite workspace member" } as Record<Exclude<Modal, null>, string>)[modal];
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section className="modal-card" role="dialog" aria-modal="true" aria-label={title}><header><div><p>DeliveryLoop</p><h2>{title}</h2></div><button onClick={close} aria-label="Close"><X size={19} /></button></header><form onSubmit={submit}>
     {modal === "feedback" ? <><label className="span-2">Release<select name="releaseId" defaultValue={selectedRelease?.id || data.releases[0]?.id}>{data.releases.map((release) => <option key={release.id} value={release.id}>{data.projects.find((project) => project.id === release.project_id)?.name} · {release.version}</option>)}</select></label><label>Feedback type<select name="type" defaultValue="Bug"><option>Bug</option><option>Change request</option><option>Content</option><option>Question</option></select></label><label>Severity<select name="severity" defaultValue="Medium"><option>Critical</option><option>High</option><option>Medium</option><option>Low</option></select></label><label className="span-2">Short title<input name="title" placeholder="Describe the issue clearly" required /></label><label className="span-2">What happened?<textarea name="actual" placeholder="What did you see and how did you get here?" required /></label><label className="span-2">What did you expect?<textarea name="expected" placeholder="Describe the expected result" required /></label><label className="span-2">Page or screen<input name="pageUrl" placeholder="/checkout/payment or a staging URL" /></label><label className="span-2 upload-field"><UploadCloud size={18} /><span><b>Attach a screenshot</b><small>PNG, JPG, WebP or GIF, up to 8 MB</small></span><input name="screenshot" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /></label></> : null}
     {modal === "client" ? <><label className="span-2">Company name<input name="name" required placeholder="Acme Limited" /></label><label>Primary contact<input name="contactName" required placeholder="Contact name" /></label><label>Email<input name="contactEmail" type="email" required placeholder="client@company.com" /></label><label className="span-2">Workspace colour<input name="accent" type="color" defaultValue="#3157D5" /></label></> : null}
-    {modal === "member" ? <><div className="modal-callout span-2"><ShieldCheck size={17} /><span>This email becomes the member’s identity when they sign in.</span></div><label className="span-2">Client<select name="clientId" defaultValue={memberClientId || ""} disabled={Boolean(memberClientId)}>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</select></label><label>Name<input name="name" required placeholder="Full name" /></label><label>Email<input name="email" type="email" required placeholder="person@client.com" /></label><label className="span-2">Role<select name="role" defaultValue="client_tester"><option value="client_admin">Client admin</option><option value="client_tester">Client tester</option><option value="client_viewer">Client viewer</option></select></label></> : null}
-    {modal === "project" ? <><label className="span-2">Client<select name="clientId">{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</select></label><label>Project name<input name="name" required placeholder="Customer portal" /></label><label>Project code<input name="code" required maxLength={5} placeholder="CPT" /></label><label className="span-2">Purpose<textarea name="description" required placeholder="What is being delivered?" /></label><label>Project lead<input name="manager" required placeholder="Team member" /></label><label>Staging URL<input name="stagingUrl" type="url" placeholder="https://staging.example.com" /></label></> : null}
+    {modal === "member" ? <><div className="modal-callout span-2"><ShieldCheck size={17} /><span>Access is granted only when this exact email signs in with ChatGPT.</span></div>{!isAgencyMember ? <label className="span-2">Client<select name="clientId" defaultValue={memberClientId || ""} disabled={Boolean(memberClientId)}>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</select></label> : null}<label>Name<input name="name" required maxLength={120} placeholder="Full name" /></label><label>Email<input name="email" type="email" required maxLength={254} placeholder={isAgencyMember ? "person@agency.com" : "person@client.com"} /></label><label className="span-2">Role<select name="role" defaultValue={isAgencyMember ? "project_manager" : "client_tester"}>{isAgencyMember ? <><option value="agency_admin">Agency admin</option><option value="project_manager">Project manager</option><option value="developer">Developer</option></> : <><option value="client_admin">Client admin</option><option value="client_tester">Client tester</option><option value="client_viewer">Client viewer</option></>}</select></label></> : null}
+    {modal === "project" ? <><label className="span-2">Client<select name="clientId">{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</select></label><label>Project name<input name="name" required placeholder="Customer portal" /></label><label>Project code<input name="code" required maxLength={8} placeholder="CPT" /></label><label className="span-2">Purpose<textarea name="description" required placeholder="What is being delivered?" /></label><label>Project lead<input name="manager" required placeholder="Team member" /></label><label>Staging URL<input name="stagingUrl" type="url" placeholder="https://staging.example.com" /></label></> : null}
     {modal === "release" ? <><label className="span-2">Project<select name="projectId">{data.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="span-2">Release name<input name="name" required placeholder="Checkout and promotions UAT" /></label><label>Version<input name="version" required placeholder="v1.0" /></label><label>Build<input name="build" required placeholder="build-001" /></label><label>Testing starts<input name="startDate" type="date" required /></label><label>Testing due<input name="dueDate" type="date" required /></label><label className="span-2">Testing instructions<textarea name="testingNotes" required placeholder="What should the client focus on?" /></label><label className="span-2">Acceptance checklist<textarea name="checklist" required placeholder={"One acceptance flow per line\nGuest checkout\nPayment recovery\nEmail confirmation"} /></label></> : null}
     <footer><button type="button" className="quiet-button" onClick={close}>Cancel</button><button className="primary-button" disabled={busy}>{busy ? "Saving…" : isClientView && modal === "feedback" ? "Submit to delivery team" : "Save"}</button></footer>
   </form></section></div>;
@@ -463,7 +534,7 @@ function StatusBadge({ value }: { value: string }) {
 }
 
 function TypeBadge({ value }: { value: string }) {
-  const Icon = feedbackIcon(value);
+  const Icon = feedbackIcons[value] || MessageCircleQuestion;
   return <span className="type-badge"><Icon size={13} />{value}</span>;
 }
 
