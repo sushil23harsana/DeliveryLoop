@@ -10,6 +10,16 @@ export const clients = sqliteTable("clients", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
+export const members = sqliteTable("members", {
+  id: text("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  name: text("name").notNull(),
+  role: text("role").notNull(),
+  clientId: text("client_id").references(() => clients.id),
+  active: text("active").notNull().default("1"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
 export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(),
   clientId: text("client_id").notNull().references(() => clients.id),

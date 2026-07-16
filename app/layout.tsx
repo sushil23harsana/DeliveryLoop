@@ -18,14 +18,14 @@ export async function generateMetadata(): Promise<Metadata> {
   const host = requestHeaders.get("x-forwarded-host") || requestHeaders.get("host") || "localhost:3000";
   const protocol = requestHeaders.get("x-forwarded-proto") || (host.startsWith("localhost") ? "http" : "https");
   const base = new URL(`${protocol}://${host}`);
-  const title = "DeliveryLoop — Client UAT Workspace";
+  const title = "DeliveryLoop - Client UAT Workspace";
   const description = "Move client releases from ready for testing to formally accepted with contextual feedback, retesting, and sign-off.";
   return {
     metadataBase: base,
     title,
     description,
-    openGraph: { title, description, type: "website", images: [{ url: new URL("/og.png", base).toString(), width: 1664, height: 934, alt: "DeliveryLoop client UAT workflow" }] },
-    twitter: { card: "summary_large_image", title, description, images: [new URL("/og.png", base).toString()] },
+    openGraph: { title, description, type: "website", images: [{ url: new URL("/og-v2.png", base).toString(), width: 1672, height: 941, alt: "DeliveryLoop client delivery workflow" }] },
+    twitter: { card: "summary_large_image", title, description, images: [new URL("/og-v2.png", base).toString()] },
   };
 }
 

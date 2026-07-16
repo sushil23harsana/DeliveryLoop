@@ -1,9 +1,13 @@
-import { getUploads } from "../../../db/workspace";
+import { getChatGPTUser } from "../../chatgpt-auth";
+import { AccessError, getUploads, resolveActor } from "../../../db/workspace";
 
 const allowedTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
 export async function POST(request: Request) {
   try {
+    const user = await getChatGPTUser();
+    const hostname = new URL(request.url).hostname;
+    await resolveActor(user ? { email: user.email, name: user.displayName } : null, hostname === "localhost" || hostname === "127.0.0.1");
     const data = await request.formData();
     const file = data.get("file");
     if (!(file instanceof File)) return Response.json({ error: "Screenshot is required" }, { status: 400 });
@@ -17,6 +21,6 @@ export async function POST(request: Request) {
     });
     return Response.json({ key, url: `/api/uploads/${encodeURIComponent(key)}` }, { status: 201 });
   } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : "Upload failed" }, { status: 500 });
+    return Response.json({ error: error instanceof Error ? error.message : "Upload failed" }, { status: error instanceof AccessError ? error.status : 500 });
   }
 }
