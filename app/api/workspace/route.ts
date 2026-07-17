@@ -12,6 +12,7 @@ import {
   getWorkspace,
   markDuplicate,
   resendMemberInvite,
+  saveScope,
   updateChecklist,
   updateMember,
   updateTicket,
@@ -48,6 +49,7 @@ export async function POST(request: Request) {
       case "addComment": result = await addComment(payload, actor); break;
       case "createReplyTemplate": result = await createReplyTemplate(payload, actor); break;
       case "deleteReplyTemplate": result = await deleteReplyTemplate(payload, actor); break;
+      case "saveScope": result = await saveScope(payload, actor); break;
       case "updateChecklist": result = await updateChecklist(payload, actor); break;
       case "approveRelease": result = await approveRelease(payload, actor); break;
       default: return json({ error: "Unknown action" }, { status: 400 });

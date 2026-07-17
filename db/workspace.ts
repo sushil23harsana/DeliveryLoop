@@ -113,6 +113,12 @@ const tableStatements = [
     id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
     created_by TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
+  `CREATE TABLE IF NOT EXISTS scope_versions (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, version INTEGER NOT NULL,
+    body TEXT NOT NULL, change_note TEXT NOT NULL DEFAULT '',
+    author TEXT NOT NULL, author_role TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
   `CREATE TABLE IF NOT EXISTS audit_events (
     id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
     action TEXT NOT NULL, actor TEXT NOT NULL, details TEXT NOT NULL DEFAULT '',
@@ -127,6 +133,7 @@ const tableStatements = [
   `CREATE INDEX IF NOT EXISTS tickets_release_idx ON tickets(release_id)`,
   `CREATE INDEX IF NOT EXISTS tickets_status_idx ON tickets(status)`,
   `CREATE INDEX IF NOT EXISTS comments_ticket_idx ON comments(ticket_id)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS scope_versions_project_version_idx ON scope_versions(project_id, version)`,
   `CREATE INDEX IF NOT EXISTS attachments_ticket_idx ON attachments(ticket_id)`,
 ];
 
@@ -279,6 +286,13 @@ async function seedDatabase(db: D1Database) {
   add("INSERT INTO comments (id,ticket_id,author,body,visibility) VALUES (?,?,?,?,?)", "comment-2", "ticket-1", "Dev Malhotra", "Root cause is stale cart state after the remove mutation. Patch is in review.", "internal");
   add("INSERT INTO comments (id,ticket_id,author,body,visibility) VALUES (?,?,?,?,?)", "comment-3", "ticket-4", "Isha Verma", "The fix is available in build-483. Please retest the saved-address flow.", "public");
   add("INSERT INTO comments (id,ticket_id,author,body,visibility) VALUES (?,?,?,?,?)", "comment-4", "ticket-5", "Sana Ali", "Updated in build-220 and ready for confirmation.", "public");
+  const scopeSeed = [
+    ["scope-1", "project-northstar", 1, "Deliverables\n- Storefront with catalogue, search and product pages\n- Guest and account checkout with card payment\n- Order history for signed-in customers\n\nOut of scope\n- Loyalty points\n- Marketplace integrations", "Initial agreed scope", "Aarav Patel", "project_manager", "2026-06-02 10:15:00"],
+    ["scope-2", "project-northstar", 2, "Deliverables\n- Storefront with catalogue, search and product pages\n- Guest and account checkout with card payment\n- Coupon and promotional pricing engine\n- Order history for signed-in customers\n\nOut of scope\n- Loyalty points\n- Marketplace integrations", "Added the coupon and promotions engine agreed in the June review call", "Maya Chen", "client_admin", "2026-06-18 15:40:00"],
+    ["scope-3", "project-northstar", 3, "Deliverables\n- Storefront with catalogue, search and product pages\n- Guest and account checkout with card payment\n- Coupon and promotional pricing engine\n- Order history for signed-in customers\n- GST number capture for business customers\n\nOut of scope\n- Loyalty points\n- Marketplace integrations\n- Multi-currency pricing", "Added GST capture; confirmed multi-currency stays out of scope", "Aarav Patel", "project_manager", "2026-07-05 11:05:00"],
+  ];
+  for (const version of scopeSeed) add("INSERT INTO scope_versions (id,project_id,version,body,change_note,author,author_role,created_at) VALUES (?,?,?,?,?,?,?,?)", ...version);
+
   add("INSERT INTO audit_events (id,entity_type,entity_id,action,actor,details) VALUES (?,?,?,?,?,?)", "audit-1", "release", "release-checkout", "Release opened for UAT", "Aarav Patel", "Northstar client testers invited");
   add("INSERT INTO audit_events (id,entity_type,entity_id,action,actor,details) VALUES (?,?,?,?,?,?)", "audit-2", "ticket", "ticket-4", "Ready for retest", "Isha Verma", "Fix deployed in build-483");
   await db.batch(queries);
@@ -323,7 +337,7 @@ export async function resolveActor(identity: { email: string; name: string } | n
 
 export async function getWorkspace(actor: Actor) {
   const db = await ensureDatabase();
-  const [clients, projects, releases, checklist, tickets, comments, audit, members, attachments, templates] = await Promise.all([
+  const [clients, projects, releases, checklist, tickets, comments, audit, members, attachments, templates, scope] = await Promise.all([
     db.prepare("SELECT * FROM clients ORDER BY created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM projects ORDER BY created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM releases ORDER BY due_date ASC").all<Record<string, unknown>>(),
@@ -338,10 +352,13 @@ export async function getWorkspace(actor: Actor) {
       // whole workspace down over an optional feature table.
       ? db.prepare("SELECT * FROM reply_templates ORDER BY created_at ASC").all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] }))
       : Promise.resolve({ results: [] as Record<string, unknown>[] }),
+    // Fail-soft so a deploy that lands before migration 0008 cannot take the
+    // whole workspace down over the optional scope-of-work table.
+    db.prepare("SELECT * FROM scope_versions ORDER BY project_id ASC, version ASC").all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] })),
   ]);
 
   if (actor.isStaff) {
-    return { clients: clients.results, projects: projects.results, releases: releases.results, checklist: checklist.results, tickets: tickets.results, comments: comments.results, audit: audit.results, members: members.results, attachments: attachments.results, templates: templates.results };
+    return { clients: clients.results, projects: projects.results, releases: releases.results, checklist: checklist.results, tickets: tickets.results, comments: comments.results, audit: audit.results, members: members.results, attachments: attachments.results, templates: templates.results, scope: scope.results };
   }
 
   if (!actor.clientId) throw new AccessError("Client membership is incomplete", 403);
@@ -354,7 +371,8 @@ export async function getWorkspace(actor: Actor) {
   const ticketIds = new Set(scopedTickets.map((ticket) => ticket.id));
   const scopedAudit = audit.results.filter((event) =>
     (event.entity_type === "ticket" && ticketIds.has(event.entity_id)) ||
-    (event.entity_type === "release" && releaseIds.has(event.entity_id))
+    (event.entity_type === "release" && releaseIds.has(event.entity_id)) ||
+    (event.entity_type === "scope" && projectIds.has(event.entity_id))
   );
   return {
     clients: scopedClients,
@@ -367,6 +385,7 @@ export async function getWorkspace(actor: Actor) {
     members: actor.role === "client_admin" ? members.results.filter((member) => member.client_id === actor.clientId) : [],
     attachments: attachments.results.filter((attachment) => ticketIds.has(attachment.ticket_id)),
     templates: [],
+    scope: scope.results.filter((version) => projectIds.has(version.project_id)),
   };
 }
 
@@ -840,6 +859,29 @@ export async function deleteReplyTemplate(input: Record<string, string>, actor: 
   await enforceRateLimit(actor, "template:manage", 60, 60);
   await db.prepare("DELETE FROM reply_templates WHERE id = ?").bind(templateId).run();
   await audit(db, "template", templateId, "Reply template removed", actor, template.title);
+}
+
+export async function saveScope(input: Record<string, string>, actor: Actor) {
+  requireRole(actor, ["agency_admin", "project_manager", "client_admin"], "Only administrators, project managers and client admins can revise the scope of work");
+  const db = await ensureDatabase();
+  const projectId = required(input, "projectId", "Project", 100);
+  await assertProjectAccess(db, actor, projectId);
+  const body = required(input, "body", "Scope of work", 20000);
+  const changeNote = optional(input, "changeNote", 300);
+  const latest = await db.prepare("SELECT version, body FROM scope_versions WHERE project_id = ? ORDER BY version DESC LIMIT 1")
+    .bind(projectId).first<{ version: number; body: string }>();
+  if (latest && latest.body === body) throw new AccessError("Nothing changed — the text matches the current version", 400);
+  if (latest && !changeNote) throw new AccessError("Describe what changed in this revision", 400);
+  await enforceRateLimit(actor, "scope:save", 30, 60);
+  const version = (latest?.version || 0) + 1;
+  const versionId = id("scope");
+  // Versions are append-only: revisions insert a new row and existing rows are
+  // never updated or deleted, so the trail stays trustworthy.
+  await db.prepare("INSERT INTO scope_versions (id,project_id,version,body,change_note,author,author_role) VALUES (?,?,?,?,?,?,?)")
+    .bind(versionId, projectId, version, body, changeNote || "Initial agreed scope", actor.name, actor.role)
+    .run();
+  await audit(db, "scope", projectId, version === 1 ? "Scope of work recorded" : `Scope revised to v${version}`, actor, changeNote || "Initial agreed scope");
+  return { versionId, version };
 }
 
 export async function updateChecklist(input: Record<string, string>, actor: Actor) {

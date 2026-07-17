@@ -20,6 +20,7 @@ import {
   Eye,
   FileText,
   FolderKanban,
+  GitCompare,
   Inbox,
   LayoutDashboard,
   LockKeyhole,
@@ -61,13 +62,14 @@ type Comment = { id: string; ticket_id: string; author: string; body: string; vi
 type Attachment = { id: string; ticket_id: string; comment_id: string | null; key: string; uploaded_by: string; created_at: string };
 type AuditEvent = { id: string; entity_type: string; entity_id: string; action: string; actor: string; details: string; created_at: string };
 type ReplyTemplate = { id: string; title: string; body: string; created_by: string; created_at: string };
+type ScopeVersion = { id: string; project_id: string; version: number; body: string; change_note: string; author: string; author_role: string; created_at: string };
 type Actor = { id: string; email: string; name: string; role: string; clientId: string | null; isStaff: boolean };
-type Workspace = { clients: Client[]; members: Member[]; projects: Project[]; releases: Release[]; checklist: ChecklistItem[]; tickets: Ticket[]; comments: Comment[]; audit: AuditEvent[]; attachments: Attachment[]; templates: ReplyTemplate[] };
+type Workspace = { clients: Client[]; members: Member[]; projects: Project[]; releases: Release[]; checklist: ChecklistItem[]; tickets: Ticket[]; comments: Comment[]; audit: AuditEvent[]; attachments: Attachment[]; templates: ReplyTemplate[]; scope: ScopeVersion[] };
 type View = "overview" | "projects" | "releases" | "feedback" | "clients" | "reports" | "settings";
 type Modal = "feedback" | "project" | "release" | "client" | "member" | null;
 type ActionPayload = Record<string, string | string[]>;
 type ReportPrefill = { pageUrl?: string; viewport?: string };
-type RunAction = (action: string, payload: ActionPayload, success: string, optimistic?: (workspace: Workspace) => Workspace) => Promise<void>;
+type RunAction = (action: string, payload: ActionPayload, success: string, optimistic?: (workspace: Workspace) => Workspace) => Promise<boolean>;
 
 const closedStatuses = new Set(["Verified", "Closed", "Deferred", "Rejected / out of scope", "Withdrawn"]);
 const statusOptions = ["Submitted", "Triaged", "In progress", "Needs information", "Approval required", "Ready for retest", "Reopened", "Verified", "Closed", "Deferred", "Rejected / out of scope", "Withdrawn"];
@@ -150,6 +152,7 @@ function scopeWorkspace(data: Workspace, clientId: string | null): Workspace {
     members: data.members.filter((member) => member.client_id === clientId),
     attachments: data.attachments.filter((attachment) => ticketIds.has(attachment.ticket_id)),
     templates: [],
+    scope: data.scope.filter((version) => projectIds.has(version.project_id)),
   };
 }
 
@@ -168,6 +171,7 @@ export function DeliveryLoopApp() {
   const [modal, setModal] = useState<Modal>(null);
   const [memberClientId, setMemberClientId] = useState<string | null>(null);
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
+  const [scopeProjectId, setScopeProjectId] = useState<string | null>(null);
   const [selectedReleaseId, setSelectedReleaseId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("All statuses");
@@ -297,9 +301,11 @@ export function DeliveryLoopApp() {
       setModal(null);
       setPrefill(null);
       notify(success);
+      return true;
     } catch (error) {
       if (optimistic) await load().catch(() => undefined);
       notify(error instanceof Error ? error.message : "Action failed");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -427,7 +433,7 @@ export function DeliveryLoopApp() {
         {view === "overview" && !isClientView ? (
           <Overview data={data} openTickets={openTickets} blockers={blockers} retest={retest} testingReleases={testingReleases} setView={setView} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} setSelectedTicketId={setSelectedTicketId} setModal={setModal} />
         ) : null}
-        {view === "projects" ? <Projects data={data} isClientView={isClientView} clientById={clientById} setView={setView} setSelectedReleaseId={setSelectedReleaseId} notify={notify} /> : null}
+        {view === "projects" ? <Projects data={data} isClientView={isClientView} clientById={clientById} setView={setView} setSelectedReleaseId={setSelectedReleaseId} setScopeProjectId={setScopeProjectId} notify={notify} /> : null}
         {view === "releases" ? <Releases data={data} actor={actor} isClientView={isClientView} selectedRelease={selectedRelease} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} runAction={runAction} busy={busy} setPrintReleaseId={setPrintReleaseId} /> : null}
         {view === "feedback" ? <Feedback data={data} tickets={visibleTickets} query={query} setQuery={setQuery} statusFilter={statusFilter} setStatusFilter={setStatusFilter} setSelectedTicketId={setSelectedTicketId} boardMode={boardMode} setBoardMode={setBoardMode} myWork={myWork} setMyWork={setMyWork} unreadIds={unreadIds} visibleCount={visibleCount} setVisibleCount={setVisibleCount} isStaff={actor.isStaff && !previewClientId} runAction={runAction} /> : null}
         {view === "clients" && (!isClientView || canManageClientMembers) ? <Clients data={data} actor={actor} openMemberModal={openMemberModal} runAction={runAction} busy={busy} notify={notify} /> : null}
@@ -437,6 +443,9 @@ export function DeliveryLoopApp() {
 
       {selectedTicket ? (
         <FeedbackDrawer ticket={selectedTicket} actor={actor} project={projectById(selectedTicket.project_id)} release={releaseById(selectedTicket.release_id)} comments={data.comments.filter((comment) => comment.ticket_id === selectedTicket.id)} attachments={data.attachments.filter((attachment) => attachment.ticket_id === selectedTicket.id)} audit={data.audit.filter((event) => event.entity_id === selectedTicket.id)} siblingTickets={data.tickets.filter((item) => item.project_id === selectedTicket.project_id && item.id !== selectedTicket.id)} openTicketByKey={(key) => { const target = data.tickets.find((item) => item.key === key); if (target) setSelectedTicketId(target.id); }} assigneeOptions={assigneeOptions} templates={fullWorkspace.templates || []} mentionNames={[...new Set([...fullWorkspace.members.filter((member) => member.active === "1").map((member) => member.name), selectedTicket.reporter, selectedTicket.assignee])].filter((name) => name && name !== "Unassigned" && name !== actor.name)} isClientView={isClientView} canRespond={canReport} close={() => setSelectedTicketId(null)} runAction={runAction} busy={busy} notify={notify} />
+      ) : null}
+      {scopeProjectId && projectById(scopeProjectId) ? (
+        <ScopePanel project={projectById(scopeProjectId)!} versions={(data.scope || []).filter((version) => version.project_id === scopeProjectId)} canEdit={["agency_admin", "project_manager", "client_admin"].includes(actor.role)} isClientView={isClientView} close={() => setScopeProjectId(null)} runAction={runAction} busy={busy} />
       ) : null}
       {modal ? (
         <ActionModal modal={modal} data={isClientView ? data : workspace} isClientView={isClientView} selectedRelease={selectedRelease} memberClientId={memberClientId} prefill={prefill} close={() => { setModal(null); setPrefill(null); }} runAction={runAction} busy={busy} notify={notify} />
@@ -526,7 +535,7 @@ function CircleDotIcon() {
   return <span className="activity-dot" />;
 }
 
-function Projects({ data, isClientView, clientById, setView, setSelectedReleaseId, notify }: { data: Workspace; isClientView: boolean; clientById: (id: string) => Client | undefined; setView: (view: View) => void; setSelectedReleaseId: (id: string) => void; notify: (message: string) => void }) {
+function Projects({ data, isClientView, clientById, setView, setSelectedReleaseId, setScopeProjectId, notify }: { data: Workspace; isClientView: boolean; clientById: (id: string) => Client | undefined; setView: (view: View) => void; setSelectedReleaseId: (id: string) => void; setScopeProjectId: (id: string) => void; notify: (message: string) => void }) {
   async function copyBookmarklet(projectName: string) {
     const origin = window.location.origin;
     const bookmarklet = `javascript:(function(){var u=encodeURIComponent(location.href);var v=encodeURIComponent(innerWidth+' x '+innerHeight);window.open('${origin}/?report=1&url='+u+'&vw='+v,'_blank');})();`;
@@ -539,7 +548,8 @@ function Projects({ data, isClientView, clientById, setView, setSelectedReleaseI
   }
   return <div className="page-content"><div className="project-list">{data.projects.map((project) => {
     const client = clientById(project.client_id); const releases = data.releases.filter((release) => release.project_id === project.id); const tickets = data.tickets.filter((ticket) => ticket.project_id === project.id); const current = releases.find((release) => release.status !== "Approved") || releases[0];
-    return <article className="project-row-card" key={project.id}><div className="project-identity"><span style={{ background: client?.accent }}>{project.code}</span><div><p>{client?.name}</p><h2>{project.name}</h2><small>{project.description}</small></div></div><dl><div><dt>Lead</dt><dd>{project.manager}</dd></div><div><dt>Stage</dt><dd><StatusBadge value={project.stage} /></dd></div><div><dt>Open feedback</dt><dd>{tickets.filter((ticket) => !closedStatuses.has(ticket.status)).length}</dd></div><div><dt>Current release</dt><dd>{current?.version || "—"}</dd></div></dl><div className="row-actions"><button className="quiet-button" title="Copy a bookmarklet that opens a prefilled feedback form from any staging page" onClick={() => copyBookmarklet(project.name)}><Copy size={14} /> Capture tool</button>{project.staging_url ? <a href={project.staging_url} target="_blank" rel="noreferrer" className="quiet-button">Staging <ExternalLink size={14} /></a> : null}{current ? <button className="secondary-button" onClick={() => { setSelectedReleaseId(current.id); setView("releases"); }}>View release <ChevronRight size={14} /></button> : null}</div>{isClientView ? <span className="client-access-note"><ShieldCheck size={14} /> Your organisation only</span> : null}</article>;
+    const scopeVersion = (data.scope || []).filter((version) => version.project_id === project.id).length;
+    return <article className="project-row-card" key={project.id}><div className="project-identity"><span style={{ background: client?.accent }}>{project.code}</span><div><p>{client?.name}</p><h2>{project.name}</h2><small>{project.description}</small></div></div><dl><div><dt>Lead</dt><dd>{project.manager}</dd></div><div><dt>Stage</dt><dd><StatusBadge value={project.stage} /></dd></div><div><dt>Open feedback</dt><dd>{tickets.filter((ticket) => !closedStatuses.has(ticket.status)).length}</dd></div><div><dt>Current release</dt><dd>{current?.version || "—"}</dd></div></dl><div className="row-actions"><button className="quiet-button" title="Agreed scope of work with full version history" onClick={() => setScopeProjectId(project.id)}><FileText size={14} /> Scope of work{scopeVersion ? <em className="scope-version-chip">v{scopeVersion}</em> : null}</button><button className="quiet-button" title="Copy a bookmarklet that opens a prefilled feedback form from any staging page" onClick={() => copyBookmarklet(project.name)}><Copy size={14} /> Capture tool</button>{project.staging_url ? <a href={project.staging_url} target="_blank" rel="noreferrer" className="quiet-button">Staging <ExternalLink size={14} /></a> : null}{current ? <button className="secondary-button" onClick={() => { setSelectedReleaseId(current.id); setView("releases"); }}>View release <ChevronRight size={14} /></button> : null}</div>{isClientView ? <span className="client-access-note"><ShieldCheck size={14} /> Your organisation only</span> : null}</article>;
   })}</div></div>;
 }
 
@@ -698,7 +708,7 @@ function FeedbackTable({ tickets, projects, onOpen, unreadIds, compact = false }
   }) : <EmptyState icon={Inbox} title="No feedback in this view" body="Change the filters or report a new issue." />}</div>;
 }
 
-function Clients({ data, actor, openMemberModal, runAction, busy, notify }: { data: Workspace; actor: Actor; openMemberModal: (clientId: string) => void; runAction: (action: string, payload: ActionPayload, success: string) => Promise<void>; busy: boolean; notify: (message: string) => void }) {
+function Clients({ data, actor, openMemberModal, runAction, busy, notify }: { data: Workspace; actor: Actor; openMemberModal: (clientId: string) => void; runAction: (action: string, payload: ActionPayload, success: string) => Promise<boolean>; busy: boolean; notify: (message: string) => void }) {
   return <div className="page-content client-page">
     <div className="access-intro surface"><div><ShieldCheck size={19} /><span><p>Tenant-aware access</p><h2>Every client is isolated to its own releases, feedback and public conversations.</h2></span></div><small>Access is matched to the exact verified email invited here.</small></div>
     <div className="client-list">{data.clients.map((client) => {
@@ -714,7 +724,7 @@ function Clients({ data, actor, openMemberModal, runAction, busy, notify }: { da
   </div>;
 }
 
-function Settings({ data, actor, openMemberModal, runAction, busy, notify }: { data: Workspace; actor: Actor; openMemberModal: (clientId: string) => void; runAction: (action: string, payload: ActionPayload, success: string) => Promise<void>; busy: boolean; notify: (message: string) => void }) {
+function Settings({ data, actor, openMemberModal, runAction, busy, notify }: { data: Workspace; actor: Actor; openMemberModal: (clientId: string) => void; runAction: (action: string, payload: ActionPayload, success: string) => Promise<boolean>; busy: boolean; notify: (message: string) => void }) {
   const staff = data.members.filter((member) => !member.client_id && ["agency_admin", "project_manager", "developer"].includes(member.role));
   const activeClientMembers = data.members.filter((member) => member.client_id && member.active === "1").length;
   const clientAdmins = new Set(data.members.filter((member) => member.role === "client_admin" && member.active === "1").map((member) => member.client_id));
@@ -733,7 +743,7 @@ function Settings({ data, actor, openMemberModal, runAction, busy, notify }: { d
   </div>;
 }
 
-function TemplatePanel({ templates, runAction, busy }: { templates: ReplyTemplate[]; runAction: (action: string, payload: ActionPayload, success: string) => Promise<void>; busy: boolean }) {
+function TemplatePanel({ templates, runAction, busy }: { templates: ReplyTemplate[]; runAction: (action: string, payload: ActionPayload, success: string) => Promise<boolean>; busy: boolean }) {
   const [adding, setAdding] = useState(false);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -781,7 +791,7 @@ function KeyRoundIcon() {
   return <span className="account-security-icon"><LockKeyhole size={18} /></span>;
 }
 
-function MemberDirectory({ members, actor, runAction, busy, notify }: { members: Member[]; actor: Actor; runAction: (action: string, payload: ActionPayload, success: string) => Promise<void>; busy: boolean; notify: (message: string) => void }) {
+function MemberDirectory({ members, actor, runAction, busy, notify }: { members: Member[]; actor: Actor; runAction: (action: string, payload: ActionPayload, success: string) => Promise<boolean>; busy: boolean; notify: (message: string) => void }) {
   async function copyAccessLink(member: Member) {
     const link = `${window.location.origin}/?auth=activate&email=${encodeURIComponent(member.email)}`;
     try {
@@ -970,6 +980,121 @@ function FeedbackDrawer({ ticket, actor, project, release, comments, attachments
       </section>
     </div>
   </aside></div>;
+}
+
+type DiffLine = { kind: "same" | "add" | "del"; text: string };
+
+function diffLines(oldText: string, newText: string): DiffLine[] {
+  const a = oldText.split("\n");
+  const b = newText.split("\n");
+  const table: number[][] = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      table[i][j] = a[i] === b[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
+    }
+  }
+  const lines: DiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { lines.push({ kind: "same", text: a[i] }); i++; j++; }
+    else if (table[i + 1][j] >= table[i][j + 1]) { lines.push({ kind: "del", text: a[i] }); i++; }
+    else { lines.push({ kind: "add", text: b[j] }); j++; }
+  }
+  while (i < a.length) lines.push({ kind: "del", text: a[i++] });
+  while (j < b.length) lines.push({ kind: "add", text: b[j++] });
+  return lines;
+}
+
+function ScopePanel({ project, versions, canEdit, isClientView, close, runAction, busy }: { project: Project; versions: ScopeVersion[]; canEdit: boolean; isClientView: boolean; close: () => void; runAction: RunAction; busy: boolean }) {
+  const ordered = [...versions].sort((a, b) => a.version - b.version);
+  const latest = ordered.length ? ordered[ordered.length - 1] : undefined;
+  const [mode, setMode] = useState<"current" | "history" | "edit" | "compare">(versions.length ? "current" : canEdit ? "edit" : "current");
+  const [viewing, setViewing] = useState<number | null>(null);
+  const [selected, setSelected] = useState<number[]>([]);
+  const [draft, setDraft] = useState(latest?.body || "");
+  const [note, setNote] = useState("");
+
+  function startEdit(body: string, prefillNote = "") { setDraft(body); setNote(prefillNote); setMode("edit"); }
+  function toggleSelect(version: number) {
+    setSelected((current) => current.includes(version) ? current.filter((item) => item !== version) : [...current.slice(current.length >= 2 ? 1 : 0), version]);
+  }
+  async function save() {
+    const ok = await runAction("saveScope", { projectId: project.id, body: draft.trim(), changeNote: note.trim() }, ordered.length ? "Scope revision saved" : "Scope of work recorded");
+    if (ok) { setMode("current"); setSelected([]); setViewing(null); }
+  }
+
+  const [lowVersion, highVersion] = [...selected].sort((a, b) => a - b);
+  const compareOlder = ordered.find((version) => version.version === lowVersion);
+  const compareNewer = ordered.find((version) => version.version === highVersion);
+
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
+    <section className="modal-card scope-card" role="dialog" aria-modal="true" aria-label={`Scope of work for ${project.name}`}>
+      <header><div><p>Scope of work</p><h2>{project.name}</h2></div><button onClick={close} aria-label="Close"><X size={19} /></button></header>
+      <div className="scope-shell">
+        <nav className="scope-tabs" aria-label="Scope views">
+          <button className={mode === "current" || mode === "edit" ? "active" : ""} onClick={() => { setMode(latest || !canEdit ? "current" : "edit"); setViewing(null); }}><FileText size={14} /> Current</button>
+          <button className={mode === "history" || mode === "compare" ? "active" : ""} disabled={!ordered.length} onClick={() => { setMode("history"); setViewing(null); }}><Clock3 size={14} /> Version history{ordered.length ? <em>{ordered.length}</em> : null}</button>
+        </nav>
+
+        {mode === "current" ? (latest ? <>
+          <div className="scope-meta">
+            <span className="scope-version-badge">v{latest.version}</span>
+            <div><b>{latest.author}</b><small>{roleLabel(latest.author_role)} · {formatDate(latest.created_at, true)}</small></div>
+            {canEdit ? <button className="secondary-button" onClick={() => startEdit(latest.body)}><Pencil size={14} /> Revise scope</button> : null}
+          </div>
+          {latest.change_note ? <p className="scope-note">{latest.change_note}</p> : null}
+          <pre className="scope-body">{latest.body}</pre>
+          {isClientView ? <div className="client-help"><ShieldCheck size={17} /><span><b>Every revision is recorded.</b><small>Version, author and date are kept for the full history of what was agreed.</small></span></div> : null}
+        </> : <div className="empty-state"><FileText size={24} /><h3>No scope recorded yet</h3><p>{canEdit ? "Record what was initially agreed so every later revision is tracked with its author and version." : "The agreed scope of work has not been recorded for this project yet."}</p>{canEdit ? <button className="primary-button" onClick={() => startEdit("")}>Record the agreed scope</button> : null}</div>) : null}
+
+        {mode === "edit" ? <div className="scope-editor">
+          <label>Scope of work<textarea value={draft} maxLength={20000} onChange={(event) => setDraft(event.target.value)} placeholder={"Deliverables\n- What will be built\n\nOut of scope\n- What is explicitly excluded"} /></label>
+          {ordered.length ? <label>What changed in this revision?<input value={note} maxLength={300} onChange={(event) => setNote(event.target.value)} placeholder="e.g. Added the coupon engine agreed on the review call" /></label> : null}
+          <p className="scope-editor-hint"><ShieldCheck size={14} /> Saving creates a new version. Earlier versions are never changed or deleted.</p>
+          <footer><button type="button" className="quiet-button" onClick={() => { setMode("current"); }}>Cancel</button><button className="primary-button" disabled={busy || !draft.trim() || (ordered.length > 0 && !note.trim())} onClick={() => void save()}>{busy ? "Saving…" : ordered.length ? `Save as v${(latest?.version || 0) + 1}` : "Save initial scope (v1)"}</button></footer>
+        </div> : null}
+
+        {mode === "history" ? <div className="scope-history">
+          <div className="scope-compare-bar">
+            <span>{selected.length === 2 ? "Ready to compare the selected versions" : "Tick any two versions to compare them"}</span>
+            <button className="secondary-button" disabled={selected.length !== 2} onClick={() => setMode("compare")}><GitCompare size={14} /> Compare selected</button>
+          </div>
+          <div className="scope-version-list">
+            {[...ordered].reverse().map((version) => <div key={version.id} className="scope-version-row">
+              <div className="scope-version-line">
+                <label className="scope-check" title="Select for comparison"><input type="checkbox" aria-label={`Select v${version.version} for comparison`} checked={selected.includes(version.version)} onChange={() => toggleSelect(version.version)} /></label>
+                <button className="scope-version-main" onClick={() => setViewing(viewing === version.version ? null : version.version)}>
+                  <span className="scope-version-badge">v{version.version}</span>
+                  <span className="scope-version-info"><b>{version.change_note || (version.version === 1 ? "Initial agreed scope" : "Revision")}</b><small>{version.author} · {roleLabel(version.author_role)} · {formatDate(version.created_at, true)}</small></span>
+                  {version.version === latest?.version ? <em className="scope-current-chip">Current</em> : null}
+                </button>
+              </div>
+              {viewing === version.version ? <div className="scope-version-detail"><pre className="scope-body">{version.body}</pre>{canEdit && version.version !== latest?.version ? <button className="secondary-button" onClick={() => startEdit(version.body, `Restored from v${version.version}`)}><RefreshCcw size={14} /> Restore as new version</button> : null}</div> : null}
+            </div>)}
+          </div>
+        </div> : null}
+
+        {mode === "compare" && compareOlder && compareNewer ? (() => {
+          const lines = diffLines(compareOlder.body, compareNewer.body);
+          const added = lines.filter((line) => line.kind === "add").length;
+          const removed = lines.filter((line) => line.kind === "del").length;
+          return <div className="scope-compare">
+            <div className="scope-compare-head">
+              <button className="quiet-button" onClick={() => setMode("history")}>Back to history</button>
+              <span className="scope-diff-count"><em className="add">+{added} added</em><em className="del">−{removed} removed</em></span>
+            </div>
+            <div className="scope-compare-title">
+              <span><i className="scope-version-badge">v{compareOlder.version}</i><b>{compareOlder.author}</b><small>{formatDate(compareOlder.created_at, true)}</small></span>
+              <GitCompare size={15} />
+              <span><i className="scope-version-badge">v{compareNewer.version}</i><b>{compareNewer.author}</b><small>{formatDate(compareNewer.created_at, true)}</small></span>
+            </div>
+            <div className="scope-diff">{lines.map((line, index) => <div key={index} className={`diff-line ${line.kind}`}><span>{line.kind === "add" ? "+" : line.kind === "del" ? "−" : ""}</span><p>{line.text || " "}</p></div>)}</div>
+          </div>;
+        })() : null}
+      </div>
+    </section>
+  </div>;
 }
 
 function ActionModal({ modal, data, isClientView, selectedRelease, memberClientId, prefill, close, runAction, busy, notify }: { modal: Exclude<Modal, null>; data: Workspace; isClientView: boolean; selectedRelease?: Release; memberClientId: string | null; prefill: ReportPrefill | null; close: () => void; runAction: RunAction; busy: boolean; notify: (message: string) => void }) {

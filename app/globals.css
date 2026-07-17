@@ -257,6 +257,64 @@ strong, b, dd, .summary-strip strong, .readiness-number { font-variant-numeric: 
 .template-row > button { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--muted); cursor: pointer; transition: color 0.15s, border-color 0.15s, background 0.15s; }
 .template-row > button:hover { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger); }
 
+.scope-version-chip { min-width: 24px; margin-left: 2px; padding: 2px 6px; display: inline-grid; place-items: center; border-radius: 9px; background: var(--brand-chip); color: var(--brand-dark); font-size: 10px; font-style: normal; font-weight: 700; }
+.scope-card { width: min(880px, 100%); }
+.scope-shell { padding: 16px 24px 24px; }
+.scope-tabs { margin-bottom: 16px; padding: 3px; display: inline-flex; gap: 2px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); }
+.scope-tabs button { min-height: 32px; padding: 0 13px; display: inline-flex; align-items: center; gap: 7px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 12.5px; font-weight: 650; cursor: pointer; transition: background 0.16s var(--ease), color 0.16s var(--ease); }
+.scope-tabs button.active { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm); }
+.scope-tabs button:disabled { opacity: 0.5; cursor: default; }
+.scope-tabs button em { min-width: 20px; height: 18px; padding: 0 6px; display: grid; place-items: center; border-radius: 9px; background: var(--chip-bg); color: var(--ink-soft); font-size: 10.5px; font-style: normal; font-weight: 700; }
+.scope-meta { display: flex; align-items: center; gap: 12px; }
+.scope-meta > div { min-width: 0; flex: 1; }
+.scope-meta b { display: block; font-size: 13px; }
+.scope-meta small { display: block; margin-top: 2px; color: var(--muted); font-size: 11.5px; }
+.scope-version-badge { min-width: 34px; height: 26px; padding: 0 8px; display: inline-grid; place-items: center; flex: none; border: 1px solid var(--brand-line); border-radius: 8px; background: var(--brand-soft); color: var(--brand-dark); font-size: 12px; font-style: normal; font-weight: 750; }
+.scope-note { margin: 12px 0 0; padding: 10px 13px; border: 1px solid var(--line); border-left: 3px solid var(--brand); border-radius: 8px; background: var(--surface-soft); color: var(--ink-soft); font-size: 12.5px; line-height: 1.55; }
+.scope-body { margin: 12px 0 0; padding: 16px 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font: inherit; font-size: 13px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: break-word; }
+.scope-shell .client-help { margin-top: 14px; }
+.scope-editor { display: grid; gap: 12px; }
+.scope-editor label { color: var(--ink-soft); font-size: 11px; font-weight: 650; }
+.scope-editor textarea { min-height: 260px; line-height: 1.65; }
+.scope-editor-hint { margin: 0; display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11.5px; }
+.scope-editor footer { display: flex; justify-content: flex-end; gap: 8px; }
+.scope-compare-bar { padding: 10px 13px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); }
+.scope-compare-bar > span { color: var(--muted); font-size: 12px; font-weight: 600; }
+.scope-version-list { margin-top: 12px; display: grid; gap: 8px; }
+.scope-version-row { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); overflow: hidden; }
+.scope-version-line { display: flex; align-items: stretch; }
+.scope-check { padding: 0 4px 0 13px; display: flex; align-items: center; cursor: pointer; }
+.scope-check input { width: 15px; height: 15px; accent-color: var(--brand); cursor: pointer; }
+.scope-version-main { min-width: 0; flex: 1; padding: 12px 13px; display: flex; align-items: center; gap: 12px; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; transition: background 0.15s var(--ease); }
+.scope-version-main:hover { background: var(--surface-hover); }
+.scope-version-info { min-width: 0; flex: 1; }
+.scope-version-info b { display: block; font-size: 12.5px; overflow-wrap: break-word; }
+.scope-version-info small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+.scope-current-chip { flex: none; padding: 3px 8px; border-radius: 10px; background: var(--success-soft); color: var(--success); font-size: 10px; font-style: normal; font-weight: 700; }
+.scope-version-detail { padding: 0 13px 13px 44px; }
+.scope-version-detail .scope-body { margin-top: 0; background: var(--surface-soft); }
+.scope-version-detail .secondary-button { margin-top: 10px; }
+.scope-compare-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.scope-diff-count { display: inline-flex; gap: 6px; }
+.scope-diff-count em { padding: 3px 8px; border-radius: 9px; font-size: 11px; font-style: normal; font-weight: 700; }
+.scope-diff-count em.add { background: var(--success-soft); color: var(--success); }
+.scope-diff-count em.del { background: var(--danger-soft); color: var(--danger); }
+.scope-compare-title { margin-top: 12px; padding: 11px 13px; display: flex; align-items: center; gap: 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); color: var(--muted); }
+.scope-compare-title > span { min-width: 0; flex: 1; display: flex; align-items: center; gap: 8px; }
+.scope-compare-title b { color: var(--ink); font-size: 12.5px; }
+.scope-compare-title small { color: var(--muted); font-size: 11px; }
+.scope-diff { margin-top: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); overflow: hidden; }
+.diff-line { display: flex; align-items: stretch; font-size: 12.5px; line-height: 1.65; }
+.diff-line + .diff-line { border-top: 1px solid var(--row-line); }
+.diff-line > span { width: 28px; flex: none; display: flex; align-items: flex-start; justify-content: center; padding-top: 6px; font-weight: 700; }
+.diff-line > p { min-width: 0; flex: 1; margin: 0; padding: 6px 13px 6px 0; white-space: pre-wrap; overflow-wrap: break-word; }
+.diff-line.add { background: var(--success-soft); }
+.diff-line.add > span { color: var(--success); }
+.diff-line.del { background: var(--danger-soft); }
+.diff-line.del > span { color: var(--danger); }
+.diff-line.del > p { color: var(--ink-soft); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+.diff-line.same > p { color: var(--ink-soft); }
+
 .modal-backdrop { align-items: center; justify-content: center; padding: 20px; }.modal-card { width: min(660px, 100%); max-height: calc(100vh - 40px); overflow-y: auto; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-lg); animation: modalIn 0.24s var(--ease); }.modal-card > header { min-height: 78px; position: sticky; top: 0; z-index: 2; }.modal-card form { padding: 20px 24px 0; display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }.modal-card label { color: var(--ink-soft); font-size: 11px; font-weight: 650; }.modal-card input, .modal-card select, .modal-card textarea { width: 100%; min-height: 40px; margin-top: 6px; padding: 10px 11px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); color: var(--ink); outline: 0; font-size: 13px; transition: border-color 0.18s, box-shadow 0.18s; }.modal-card textarea { min-height: 80px; resize: vertical; }.modal-card input:focus, .modal-card select:focus, .modal-card textarea:focus { border-color: var(--focus-ring); box-shadow: 0 0 0 3px var(--brand-soft); }.modal-card .span-2 { grid-column: 1 / -1; }.modal-card footer { grid-column: 1 / -1; margin: 8px -24px 0; padding: 14px 24px; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--line); position: sticky; bottom: 0; background: var(--topbar-bg); backdrop-filter: blur(8px); }.upload-field { min-height: 80px; padding: 14px; display: grid; grid-template-columns: 24px 1fr; gap: 10px; align-items: center; border: 1.5px dashed var(--line-strong); border-radius: 9px; background: var(--table-head); transition: border-color 0.18s, background 0.18s; }.upload-field:hover { border-color: var(--focus-ring); background: var(--brand-soft); }.upload-field b, .upload-field small { display: block; }.upload-field b { color: var(--ink); font-size: 12px; }.upload-field small { margin-top: 3px; color: var(--muted); font-size: 11px; font-weight: 500; }.upload-field input { grid-column: 1 / -1; min-height: auto; margin: 2px 0 0; padding: 0; border: 0; background: transparent; }.modal-callout { padding: 12px 13px; display: flex; align-items: center; gap: 9px; border: 1px solid var(--success-line); border-radius: 8px; background: var(--success-soft); color: var(--success); font-size: 12px; }
 .toast { position: fixed; right: 22px; bottom: 22px; z-index: 150; min-height: 48px; max-width: 400px; padding: 0 16px; display: flex; align-items: center; gap: 9px; border-radius: 11px; background: rgba(26, 29, 35, 0.96); color: #fff; box-shadow: var(--shadow-lg); backdrop-filter: blur(8px); font-size: 12.5px; font-weight: 550; animation: toastIn 0.28s var(--ease); }.toast svg { color: #7ed5b7; flex: none; }
 
@@ -421,6 +479,7 @@ strong, b, dd, .summary-strip strong, .readiness-number { font-variant-numeric: 
   .completion-body dl { grid-template-columns: 1fr; gap: 12px; }.completion-body dl > div, .completion-body dl > div:last-child { padding: 0 0 10px; border-right: 0; border-bottom: 1px solid var(--line); }.audit-table > div { grid-template-columns: 1fr 1fr; padding: 9px 0; }.audit-table > div > span:nth-child(3) { grid-column: 1 / -1; }.audit-head { display: none !important; }
   .feedback-drawer > header, .modal-card > header { padding: 16px; }.drawer-scroll { padding: 17px 16px 38px; }.property-grid, .context-panel dl { grid-template-columns: 1fr; }
   .modal-card form { grid-template-columns: 1fr; }.modal-card form > * { grid-column: 1 !important; }.modal-card footer { margin: 8px -24px 0; }
+  .scope-shell { padding: 14px 16px 20px; }.scope-compare-title { flex-direction: column; align-items: flex-start; gap: 8px; }.scope-compare-title > svg { display: none; }.scope-version-detail { padding-left: 13px; }.scope-meta { flex-wrap: wrap; }
   .account-security-panel form { grid-template-columns: 1fr 1fr; }.account-security-panel form input { grid-column: 1 / -1; }.auth-story { min-height: 210px; }.auth-story-copy { margin-top: 44px; }.auth-story-copy h1 { font-size: 28px; }.auth-brand small { display: none; }.auth-panel { min-height: calc(100vh - 210px); padding: 32px 20px; place-content: start center; }.auth-card header h2 { font-size: 26px; }
 }
 

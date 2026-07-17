@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const authUsers = sqliteTable("user", {
   id: text("id").primaryKey(),
@@ -176,6 +176,17 @@ export const replyTemplates = sqliteTable("reply_templates", {
   createdBy: text("created_by").notNull().default(""),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+export const scopeVersions = sqliteTable("scope_versions", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  version: integer("version").notNull(),
+  body: text("body").notNull(),
+  changeNote: text("change_note").notNull().default(""),
+  author: text("author").notNull(),
+  authorRole: text("author_role").notNull().default(""),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [uniqueIndex("scope_versions_project_version_idx").on(table.projectId, table.version)]);
 
 export const auditEvents = sqliteTable("audit_events", {
   id: text("id").primaryKey(),
