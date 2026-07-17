@@ -373,6 +373,7 @@ export function DeliveryLoopApp() {
         </div>
 
         <nav className="side-nav" aria-label="Primary navigation">
+          <p className="nav-label">{isClientView ? "Your workspace" : "Workspace"}</p>
           {navigation.map((item) => {
             const Icon = item.icon;
             return (
@@ -424,7 +425,7 @@ export function DeliveryLoopApp() {
         </header>
 
         {view === "overview" && !isClientView ? (
-          <Overview data={data} openTickets={openTickets} blockers={blockers} retest={retest} testingReleases={testingReleases} setView={setView} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} setSelectedTicketId={setSelectedTicketId} />
+          <Overview data={data} openTickets={openTickets} blockers={blockers} retest={retest} testingReleases={testingReleases} setView={setView} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} setSelectedTicketId={setSelectedTicketId} setModal={setModal} />
         ) : null}
         {view === "projects" ? <Projects data={data} isClientView={isClientView} clientById={clientById} setView={setView} setSelectedReleaseId={setSelectedReleaseId} notify={notify} /> : null}
         {view === "releases" ? <Releases data={data} actor={actor} isClientView={isClientView} selectedRelease={selectedRelease} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} runAction={runAction} busy={busy} setPrintReleaseId={setPrintReleaseId} /> : null}
@@ -461,14 +462,27 @@ function AccessScreen({ error }: { error: { status: number; message: string } })
   return <AuthScreen status={error.status} message={error.message} />;
 }
 
-function Overview({ data, openTickets, blockers, retest, testingReleases, setView, setSelectedReleaseId, projectById, clientById, setSelectedTicketId }: { data: Workspace; openTickets: Ticket[]; blockers: Ticket[]; retest: Ticket[]; testingReleases: Release[]; setView: (view: View) => void; setSelectedReleaseId: (id: string) => void; projectById: (id: string) => Project | undefined; clientById: (id: string) => Client | undefined; setSelectedTicketId: (id: string) => void }) {
+function Overview({ data, openTickets, blockers, retest, testingReleases, setView, setSelectedReleaseId, projectById, clientById, setSelectedTicketId, setModal }: { data: Workspace; openTickets: Ticket[]; blockers: Ticket[]; retest: Ticket[]; testingReleases: Release[]; setView: (view: View) => void; setSelectedReleaseId: (id: string) => void; projectById: (id: string) => Project | undefined; clientById: (id: string) => Client | undefined; setSelectedTicketId: (id: string) => void; setModal: (modal: Modal) => void }) {
   const verified = data.tickets.filter((ticket) => closedStatuses.has(ticket.status)).length;
+  if (!data.releases.length) {
+    return <div className="page-content overview-page">
+      <section className="onboarding surface">
+        <header><p>Welcome to DeliveryLoop</p><h2>Set up your first client delivery loop</h2><small>Three quick steps and you can hand a release to a client for structured testing and sign-off.</small></header>
+        <div className="onboarding-steps">
+          <button onClick={() => setModal("client")}><span className={data.clients.length ? "step-num done" : "step-num"}>{data.clients.length ? <Check size={14} /> : "1"}</span><b>Create a client workspace</b><small>The company whose delivery you are running. Their testers will only ever see their own work.</small></button>
+          <button disabled={!data.clients.length} onClick={() => setModal("project")}><span className={data.projects.length ? "step-num done" : "step-num"}>{data.projects.length ? <Check size={14} /> : "2"}</span><b>Add a project</b><small>What you are building for them — it gets a code like ACM that numbers every feedback ticket.</small></button>
+          <button disabled={!data.projects.length} onClick={() => setModal("release")}><span className="step-num">3</span><b>Prepare a release</b><small>A build for the client to test, with the acceptance checklist they should work through.</small></button>
+        </div>
+        <p className="onboarding-hint"><ShieldCheck size={16} /> After that, invite the client&apos;s testers under Clients &amp; access — they report feedback, you fix, they verify, and finally sign the release off.</p>
+      </section>
+    </div>;
+  }
   return <div className="page-content overview-page">
     <section className="summary-strip" aria-label="Delivery summary">
-      <div><span>Releases in UAT</span><strong>{testingReleases.length}</strong><small>{data.releases.length} releases tracked</small></div>
-      <div><span>Open feedback</span><strong>{openTickets.length}</strong><small>{blockers.length} high-impact items</small></div>
-      <div><span>Waiting on client</span><strong>{retest.length}</strong><small>Ready for retest</small></div>
-      <div><span>Closed this cycle</span><strong>{verified}</strong><small>{data.tickets.length ? Math.round((verified / data.tickets.length) * 100) : 0}% completion</small></div>
+      <div><i className="metric-icon tone-brand"><PackageCheck size={16} /></i><span>Releases in UAT</span><strong>{testingReleases.length}</strong><small>{data.releases.length} releases tracked</small></div>
+      <div><i className="metric-icon tone-danger"><MessageSquareWarning size={16} /></i><span>Open feedback</span><strong>{openTickets.length}</strong><small>{blockers.length} high-impact items</small></div>
+      <div><i className="metric-icon tone-warning"><RefreshCcw size={16} /></i><span>Waiting on client</span><strong>{retest.length}</strong><small>Ready for retest</small></div>
+      <div><i className="metric-icon tone-success"><CheckCircle2 size={16} /></i><span>Closed this cycle</span><strong>{verified}</strong><small>{data.tickets.length ? Math.round((verified / data.tickets.length) * 100) : 0}% completion</small></div>
     </section>
 
     <section className="content-grid">
@@ -531,7 +545,7 @@ function Projects({ data, isClientView, clientById, setView, setSelectedReleaseI
 
 function Releases({ data, actor, isClientView, selectedRelease, setSelectedReleaseId, projectById, clientById, runAction, busy, setPrintReleaseId }: { data: Workspace; actor: Actor; isClientView: boolean; selectedRelease?: Release; setSelectedReleaseId: (id: string) => void; projectById: (id: string) => Project | undefined; clientById: (id: string) => Client | undefined; runAction: RunAction; busy: boolean; setPrintReleaseId: (id: string | null) => void }) {
   const [exceptions, setExceptions] = useState("");
-  if (!selectedRelease) return <div className="page-content"><EmptyState icon={PackageCheck} title="No releases yet" body="Create the first release to begin client UAT." /></div>;
+  if (!selectedRelease) return <div className="page-content"><EmptyState icon={PackageCheck} title="No releases yet" body={isClientView ? "Your delivery team has not opened a release for testing yet. You will be notified when one is ready." : "Create the first release to begin client UAT."} /></div>;
   const project = projectById(selectedRelease.project_id); const client = clientById(project?.client_id || "");
   const checks = data.checklist.filter((item) => item.release_id === selectedRelease.id);
   const releaseTickets = data.tickets.filter((ticket) => ticket.release_id === selectedRelease.id);
@@ -652,7 +666,7 @@ function FeedbackBoard({ tickets, onOpen, isStaff, unreadIds, runAction }: { tic
         onDragOver={(event) => { if (isStaff) { event.preventDefault(); setDragOver(column.id); } }}
         onDragLeave={() => setDragOver((current) => current === column.id ? null : current)}
         onDrop={(event) => handleDrop(column.id, event)}>
-        <header><span>{column.label}</span><em>{columnTickets.length}</em></header>
+        <header><span><i className={`col-dot ${column.id}`} />{column.label}</span><em>{columnTickets.length}</em></header>
         <div className="board-cards">
           {columnTickets.map((ticket) => {
             const chip = slaChip(ticket);
@@ -941,15 +955,17 @@ function FeedbackDrawer({ ticket, actor, project, release, comments, attachments
           return <div className={`comment ${comment.visibility}`} key={comment.id}><span className="avatar small">{initials(comment.author)}</span><div><p><b>{comment.author}</b>{comment.visibility === "internal" ? <em>Internal</em> : null}<time>{formatDate(comment.created_at)}</time></p><div>{comment.body}</div>{attachment ? <a className="attachment-link small" href={`/api/uploads/${encodeURIComponent(attachment.key)}`} target="_blank" rel="noreferrer"><Paperclip size={13} /> Attached screenshot <ExternalLink size={12} /></a> : null}</div></div>;
         })}
         {canRespond ? <form className="reply-form" onSubmit={submitReply}>
-          {!isClientView && templates.length ? <select className="template-picker" value="" aria-label="Insert a saved reply" onChange={(event) => { const template = templates.find((item) => item.id === event.target.value); if (template) insertText(template.body); }}>
-            <option value="" disabled>Insert saved reply…</option>
-            {templates.map((template) => <option key={template.id} value={template.id}>{template.title}</option>)}
-          </select> : null}
           <textarea name="body" value={replyBody} onChange={(event) => setReplyBody(event.target.value)} placeholder={isClientView ? "Reply to the delivery team" : "Add an update"} required />
           {mentionNames.length ? <div className="mention-row"><span>Mention</span>{mentionNames.slice(0, 6).map((name) => <button type="button" key={name} className="mention-chip" onClick={() => insertText(`@${name}`)}>@{name}</button>)}</div> : null}
-          <label className="reply-attach" title="Attach a screenshot"><Paperclip size={14} /><input name="screenshot" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /><span>Screenshot</span></label>
-          {!isClientView ? <label><input type="checkbox" name="visibility" value="internal" /> Internal note</label> : <span />}
-          <button className="primary-button" disabled={busy}><Send size={14} /> Send</button>
+          <footer className="reply-toolbar">
+            {!isClientView && templates.length ? <select className="template-picker" value="" aria-label="Insert a saved reply" onChange={(event) => { const template = templates.find((item) => item.id === event.target.value); if (template) insertText(template.body); }}>
+              <option value="" disabled>Saved reply…</option>
+              {templates.map((template) => <option key={template.id} value={template.id}>{template.title}</option>)}
+            </select> : null}
+            <label className="reply-attach" title="Attach a screenshot"><Paperclip size={14} /><input name="screenshot" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /><span>Screenshot</span></label>
+            {!isClientView ? <label><input type="checkbox" name="visibility" value="internal" /> Internal note</label> : null}
+            <button className="primary-button" disabled={busy}><Send size={14} /> Send</button>
+          </footer>
         </form> : <p className="approval-note">This account has read-only access to the conversation.</p>}
       </section>
     </div>
