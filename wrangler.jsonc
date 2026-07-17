@@ -21,7 +21,11 @@
   "vars": {
     "APP_ENV": "production",
     "BETTER_AUTH_URL": "https://deliveryloop.altrd-brain.workers.dev",
-    "BOOTSTRAP_ADMIN_EMAIL": "sushil23harsana@gmail.com"
+    "BOOTSTRAP_ADMIN_EMAIL": "sushil23harsana@gmail.com",
+    // Resend test sender: delivers only to the Resend account owner's email.
+    // Swap for "DeliveryLoop <delivery@updates.yourdomain.com>" once a
+    // sending domain is verified in Resend.
+    "EMAIL_FROM": "DeliveryLoop <onboarding@resend.dev>"
   },
   "d1_databases": [
     {
