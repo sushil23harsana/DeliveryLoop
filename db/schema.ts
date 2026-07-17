@@ -169,6 +169,14 @@ export const comments = sqliteTable("comments", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
+export const replyTemplates = sqliteTable("reply_templates", {
+  id: text("id").primaryKey(),
+  title: text("title").notNull(),
+  body: text("body").notNull(),
+  createdBy: text("created_by").notNull().default(""),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
 export const auditEvents = sqliteTable("audit_events", {
   id: text("id").primaryKey(),
   entityType: text("entity_type").notNull(),

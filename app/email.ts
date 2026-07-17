@@ -109,6 +109,22 @@ export async function queueNotificationEmail(input: {
   return true;
 }
 
+export function queueSlackMessage(text: string) {
+  const runtime = bindings();
+  const webhook = runtime.SLACK_WEBHOOK_URL;
+  if (!webhook) return false;
+  waitUntil(fetch(webhook, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  }).then((response) => {
+    if (!response.ok) console.error(JSON.stringify({ event: "slack_notify_failed", status: response.status }));
+  }).catch((error) => {
+    console.error(JSON.stringify({ event: "slack_notify_failed", message: error instanceof Error ? error.message : String(error) }));
+  }));
+  return true;
+}
+
 export async function queueInvitationEmail(member: { id: string; email: string; name: string }, invitedBy: string, eventId = member.id) {
   const runtime = bindings();
   if (!runtime.RESEND_API_KEY || !runtime.EMAIL_FROM || !runtime.BETTER_AUTH_URL) return false;

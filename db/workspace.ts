@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { queueInvitationEmail, queueNotificationEmail } from "../app/email";
+import { queueInvitationEmail, queueNotificationEmail, queueSlackMessage } from "../app/email";
 
 type Bindings = { APP_ENV?: string; DB: D1Database; UPLOADS?: R2Bucket; BOOTSTRAP_ADMIN_EMAIL?: string };
 
@@ -108,6 +108,10 @@ const tableStatements = [
     id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL, author TEXT NOT NULL,
     body TEXT NOT NULL, visibility TEXT NOT NULL DEFAULT 'public',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS reply_templates (
+    id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE TABLE IF NOT EXISTS audit_events (
     id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
@@ -319,7 +323,7 @@ export async function resolveActor(identity: { email: string; name: string } | n
 
 export async function getWorkspace(actor: Actor) {
   const db = await ensureDatabase();
-  const [clients, projects, releases, checklist, tickets, comments, audit, members, attachments] = await Promise.all([
+  const [clients, projects, releases, checklist, tickets, comments, audit, members, attachments, templates] = await Promise.all([
     db.prepare("SELECT * FROM clients ORDER BY created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM projects ORDER BY created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM releases ORDER BY due_date ASC").all<Record<string, unknown>>(),
@@ -329,10 +333,15 @@ export async function getWorkspace(actor: Actor) {
     db.prepare("SELECT * FROM audit_events ORDER BY created_at DESC LIMIT 200").all<Record<string, unknown>>(),
     db.prepare("SELECT id,email,name,role,client_id,active,invited_by,invited_at,last_seen_at,updated_at,created_at FROM members ORDER BY created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM attachments ORDER BY created_at ASC").all<Record<string, unknown>>(),
+    actor.isStaff
+      // Fail-soft so a deploy that lands before migration 0007 cannot take the
+      // whole workspace down over an optional feature table.
+      ? db.prepare("SELECT * FROM reply_templates ORDER BY created_at ASC").all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] }))
+      : Promise.resolve({ results: [] as Record<string, unknown>[] }),
   ]);
 
   if (actor.isStaff) {
-    return { clients: clients.results, projects: projects.results, releases: releases.results, checklist: checklist.results, tickets: tickets.results, comments: comments.results, audit: audit.results, members: members.results, attachments: attachments.results };
+    return { clients: clients.results, projects: projects.results, releases: releases.results, checklist: checklist.results, tickets: tickets.results, comments: comments.results, audit: audit.results, members: members.results, attachments: attachments.results, templates: templates.results };
   }
 
   if (!actor.clientId) throw new AccessError("Client membership is incomplete", 403);
@@ -357,6 +366,7 @@ export async function getWorkspace(actor: Actor) {
     audit: scopedAudit,
     members: actor.role === "client_admin" ? members.results.filter((member) => member.client_id === actor.clientId) : [],
     attachments: attachments.results.filter((attachment) => ticketIds.has(attachment.ticket_id)),
+    templates: [],
   };
 }
 
@@ -409,8 +419,44 @@ async function queueTicketNotification(db: D1Database, actor: Actor, ticketId: s
       path: `/?ticket=${encodeURIComponent(ticket.key)}`,
       eventId: `${kind}:${ticketId}:${crypto.randomUUID()}`,
     });
+    queueSlackMessage(`${content[kind].heading}: ${content[kind].copy}`);
   } catch (error) {
     console.error(JSON.stringify({ event: "ticket_notification_failed", message: error instanceof Error ? error.message : String(error) }));
+  }
+}
+
+// Anyone written as "@Full Name" in a comment gets a direct email, provided the
+// comment is visible to them: staff can always be mentioned, client members only
+// on public comments for their own client's ticket.
+async function queueMentionNotifications(db: D1Database, actor: Actor, ticketId: string, body: string, visibility: string) {
+  try {
+    if (!body.includes("@")) return;
+    const ticket = await db.prepare(`SELECT t.key, t.title, p.client_id, p.name AS project_name
+      FROM tickets t JOIN projects p ON p.id = t.project_id WHERE t.id = ?`)
+      .bind(ticketId).first<{ key: string; title: string; client_id: string; project_name: string }>();
+    if (!ticket) return;
+    const rows = await db.prepare("SELECT email,name,role,client_id FROM members WHERE active = '1'")
+      .all<{ email: string; name: string; role: string; client_id: string | null }>();
+    const lowerBody = body.toLowerCase();
+    const mentioned = rows.results.filter((member) =>
+      member.name.trim().length > 1 &&
+      lowerBody.includes(`@${member.name.trim().toLowerCase()}`) &&
+      member.email.toLowerCase() !== actor.email.toLowerCase() &&
+      (isStaffRole(member.role) || (visibility === "public" && member.client_id === ticket.client_id))
+    );
+    if (!mentioned.length) return;
+    await queueNotificationEmail({
+      recipients: mentioned.map((member) => member.email),
+      subject: `${actor.name} mentioned you on ${ticket.key}`,
+      eyebrow: "DeliveryLoop mention",
+      heading: "You were mentioned",
+      copy: `${actor.name} mentioned you on “${ticket.title}” (${ticket.key}) on ${ticket.project_name}: ${body.slice(0, 240)}`,
+      button: "Open feedback",
+      path: `/?ticket=${encodeURIComponent(ticket.key)}`,
+      eventId: `mention:${ticketId}:${crypto.randomUUID()}`,
+    });
+  } catch (error) {
+    console.error(JSON.stringify({ event: "mention_notification_failed", message: error instanceof Error ? error.message : String(error) }));
   }
 }
 
@@ -767,6 +813,33 @@ export async function addComment(input: Record<string, string>, actor: Actor) {
   await db.prepare("UPDATE tickets SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(ticketId).run();
   await audit(db, "ticket", ticketId, visibility === "internal" ? "Internal note added" : "Reply sent", actor);
   if (visibility === "public") await queueTicketNotification(db, actor, ticketId, "comment");
+  await queueMentionNotifications(db, actor, ticketId, body, visibility);
+}
+
+export async function createReplyTemplate(input: Record<string, string>, actor: Actor) {
+  const db = await ensureDatabase();
+  if (!actor.isStaff) throw new AccessError("Only the delivery team can manage reply templates");
+  const title = required(input, "title", "Template name", 80);
+  const body = required(input, "body", "Template text", 2000);
+  const count = await db.prepare("SELECT COUNT(*) AS count FROM reply_templates").first<{ count: number }>();
+  if ((count?.count || 0) >= 50) throw new AccessError("Remove an unused template first (limit of 50)", 400);
+  await enforceRateLimit(actor, "template:manage", 60, 60);
+  const templateId = id("template");
+  await db.prepare("INSERT INTO reply_templates (id,title,body,created_by) VALUES (?,?,?,?)")
+    .bind(templateId, title, body, actor.name).run();
+  await audit(db, "template", templateId, "Reply template added", actor, title);
+  return templateId;
+}
+
+export async function deleteReplyTemplate(input: Record<string, string>, actor: Actor) {
+  const db = await ensureDatabase();
+  if (!actor.isStaff) throw new AccessError("Only the delivery team can manage reply templates");
+  const templateId = required(input, "templateId", "Template", 100);
+  const template = await db.prepare("SELECT title FROM reply_templates WHERE id = ?").bind(templateId).first<{ title: string }>();
+  if (!template) throw new AccessError("Template not found", 404);
+  await enforceRateLimit(actor, "template:manage", 60, 60);
+  await db.prepare("DELETE FROM reply_templates WHERE id = ?").bind(templateId).run();
+  await audit(db, "template", templateId, "Reply template removed", actor, template.title);
 }
 
 export async function updateChecklist(input: Record<string, string>, actor: Actor) {
@@ -819,6 +892,7 @@ export async function approveRelease(input: Record<string, string>, actor: Actor
         path: "/",
         eventId: `approved:${releaseId}:${crypto.randomUUID()}`,
       });
+      queueSlackMessage(`Release approved: ${actor.name} approved “${release.name}” (${release.version}) on ${release.project_name}. Exceptions: ${exceptions}.`);
     }
   } catch (error) {
     console.error(JSON.stringify({ event: "release_notification_failed", message: error instanceof Error ? error.message : String(error) }));
@@ -828,7 +902,9 @@ export async function approveRelease(input: Record<string, string>, actor: Actor
 export async function canAccessAttachment(key: string, actor: Actor) {
   if (actor.isStaff) return true;
   const db = await ensureDatabase();
-  const ticket = await db.prepare("SELECT project_id FROM tickets WHERE attachment_key = ?").bind(key).first<{ project_id: string }>();
+  const ticket = await db.prepare(`SELECT project_id FROM tickets WHERE attachment_key = ?1
+    UNION SELECT t.project_id FROM attachments a JOIN tickets t ON t.id = a.ticket_id WHERE a.key = ?1`)
+    .bind(key).first<{ project_id: string }>();
   if (!ticket) return false;
   return (await projectClientId(db, ticket.project_id)) === actor.clientId;
 }

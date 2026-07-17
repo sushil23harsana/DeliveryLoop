@@ -60,8 +60,9 @@ type Ticket = { id: string; key: string; project_id: string; release_id: string;
 type Comment = { id: string; ticket_id: string; author: string; body: string; visibility: string; created_at: string };
 type Attachment = { id: string; ticket_id: string; comment_id: string | null; key: string; uploaded_by: string; created_at: string };
 type AuditEvent = { id: string; entity_type: string; entity_id: string; action: string; actor: string; details: string; created_at: string };
+type ReplyTemplate = { id: string; title: string; body: string; created_by: string; created_at: string };
 type Actor = { id: string; email: string; name: string; role: string; clientId: string | null; isStaff: boolean };
-type Workspace = { clients: Client[]; members: Member[]; projects: Project[]; releases: Release[]; checklist: ChecklistItem[]; tickets: Ticket[]; comments: Comment[]; audit: AuditEvent[]; attachments: Attachment[] };
+type Workspace = { clients: Client[]; members: Member[]; projects: Project[]; releases: Release[]; checklist: ChecklistItem[]; tickets: Ticket[]; comments: Comment[]; audit: AuditEvent[]; attachments: Attachment[]; templates: ReplyTemplate[] };
 type View = "overview" | "projects" | "releases" | "feedback" | "clients" | "reports" | "settings";
 type Modal = "feedback" | "project" | "release" | "client" | "member" | null;
 type ActionPayload = Record<string, string | string[]>;
@@ -148,6 +149,7 @@ function scopeWorkspace(data: Workspace, clientId: string | null): Workspace {
     audit: data.audit.filter((event) => ticketIds.has(event.entity_id) || releaseIds.has(event.entity_id)),
     members: data.members.filter((member) => member.client_id === clientId),
     attachments: data.attachments.filter((attachment) => ticketIds.has(attachment.ticket_id)),
+    templates: [],
   };
 }
 
@@ -173,7 +175,16 @@ export function DeliveryLoopApp() {
   const [toast, setToast] = useState<string | null>(null);
   const [accessError, setAccessError] = useState<{ status: number; message: string } | null>(null);
   const [boardMode, setBoardMode] = useState(false);
+  const [myWork, setMyWork] = useState(false);
   const [visibleCount, setVisibleCount] = useState(50);
+  const [seenMap, setSeenMap] = useState<Record<string, string>>(() => {
+    if (typeof window === "undefined") return {};
+    try {
+      return JSON.parse(window.localStorage.getItem("dl-seen") || "{}") as Record<string, string>;
+    } catch {
+      return {};
+    }
+  });
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     if (typeof window === "undefined") return "light";
     const stored = window.localStorage.getItem("dl-theme");
@@ -244,6 +255,26 @@ export function DeliveryLoopApp() {
     return () => window.removeEventListener("keydown", onKey);
   }, [actor]);
 
+  // Opening the drawer marks the ticket read as of its latest update, so the
+  // "New activity" dot only returns when someone else changes it afterwards.
+  useEffect(() => {
+    if (!selectedTicketId || !workspace) return;
+    const ticket = workspace.tickets.find((item) => item.id === selectedTicketId);
+    if (!ticket || seenMap[ticket.id] === ticket.updated_at) return;
+    const timer = window.setTimeout(() => {
+      setSeenMap((current) => {
+        const next = { ...current, [ticket.id]: ticket.updated_at };
+        try {
+          window.localStorage.setItem("dl-seen", JSON.stringify(next));
+        } catch {
+          // Storage may be unavailable in private browsing; the dot just persists.
+        }
+        return next;
+      });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [selectedTicketId, workspace, seenMap]);
+
   function toggleTheme() {
     const next = theme === "dark" ? "light" : "dark";
     setTheme(next);
@@ -299,9 +330,11 @@ export function DeliveryLoopApp() {
   const assigneeOptions = ["Unassigned", ...new Set(fullWorkspace.members.filter((member) => !member.client_id && member.active === "1").map((member) => member.name))];
   const printRelease = printReleaseId ? data.releases.find((release) => release.id === printReleaseId) : null;
 
+  const unreadIds = new Set(data.tickets.filter((ticket) => seenMap[ticket.id] !== ticket.updated_at).map((ticket) => ticket.id));
   const visibleTickets = data.tickets.filter((ticket) => {
     const project = data.projects.find((item) => item.id === ticket.project_id);
     const searchable = `${ticket.key} ${ticket.title} ${ticket.reporter} ${project?.name || ""}`.toLowerCase();
+    if (myWork && ticket.assignee !== actor.name && ticket.reporter !== actor.name) return false;
     return searchable.includes(query.toLowerCase()) && (statusFilter === "All statuses" || ticket.status === statusFilter);
   });
 
@@ -395,14 +428,14 @@ export function DeliveryLoopApp() {
         ) : null}
         {view === "projects" ? <Projects data={data} isClientView={isClientView} clientById={clientById} setView={setView} setSelectedReleaseId={setSelectedReleaseId} notify={notify} /> : null}
         {view === "releases" ? <Releases data={data} actor={actor} isClientView={isClientView} selectedRelease={selectedRelease} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} runAction={runAction} busy={busy} setPrintReleaseId={setPrintReleaseId} /> : null}
-        {view === "feedback" ? <Feedback data={data} tickets={visibleTickets} query={query} setQuery={setQuery} statusFilter={statusFilter} setStatusFilter={setStatusFilter} setSelectedTicketId={setSelectedTicketId} boardMode={boardMode} setBoardMode={setBoardMode} visibleCount={visibleCount} setVisibleCount={setVisibleCount} isStaff={actor.isStaff && !previewClientId} runAction={runAction} /> : null}
+        {view === "feedback" ? <Feedback data={data} tickets={visibleTickets} query={query} setQuery={setQuery} statusFilter={statusFilter} setStatusFilter={setStatusFilter} setSelectedTicketId={setSelectedTicketId} boardMode={boardMode} setBoardMode={setBoardMode} myWork={myWork} setMyWork={setMyWork} unreadIds={unreadIds} visibleCount={visibleCount} setVisibleCount={setVisibleCount} isStaff={actor.isStaff && !previewClientId} runAction={runAction} /> : null}
         {view === "clients" && (!isClientView || canManageClientMembers) ? <Clients data={data} actor={actor} openMemberModal={openMemberModal} runAction={runAction} busy={busy} notify={notify} /> : null}
         {view === "reports" && !isClientView ? <Reports data={data} /> : null}
         {view === "settings" && !isClientView ? <Settings data={data} actor={actor} openMemberModal={openMemberModal} runAction={runAction} busy={busy} notify={notify} /> : null}
       </main>
 
       {selectedTicket ? (
-        <FeedbackDrawer ticket={selectedTicket} actor={actor} project={projectById(selectedTicket.project_id)} release={releaseById(selectedTicket.release_id)} comments={data.comments.filter((comment) => comment.ticket_id === selectedTicket.id)} attachments={data.attachments.filter((attachment) => attachment.ticket_id === selectedTicket.id)} audit={data.audit.filter((event) => event.entity_id === selectedTicket.id)} siblingTickets={data.tickets.filter((item) => item.project_id === selectedTicket.project_id && item.id !== selectedTicket.id)} openTicketByKey={(key) => { const target = data.tickets.find((item) => item.key === key); if (target) setSelectedTicketId(target.id); }} assigneeOptions={assigneeOptions} isClientView={isClientView} canRespond={canReport} close={() => setSelectedTicketId(null)} runAction={runAction} busy={busy} notify={notify} />
+        <FeedbackDrawer ticket={selectedTicket} actor={actor} project={projectById(selectedTicket.project_id)} release={releaseById(selectedTicket.release_id)} comments={data.comments.filter((comment) => comment.ticket_id === selectedTicket.id)} attachments={data.attachments.filter((attachment) => attachment.ticket_id === selectedTicket.id)} audit={data.audit.filter((event) => event.entity_id === selectedTicket.id)} siblingTickets={data.tickets.filter((item) => item.project_id === selectedTicket.project_id && item.id !== selectedTicket.id)} openTicketByKey={(key) => { const target = data.tickets.find((item) => item.key === key); if (target) setSelectedTicketId(target.id); }} assigneeOptions={assigneeOptions} templates={fullWorkspace.templates || []} mentionNames={[...new Set([...fullWorkspace.members.filter((member) => member.active === "1").map((member) => member.name), selectedTicket.reporter, selectedTicket.assignee])].filter((name) => name && name !== "Unassigned" && name !== actor.name)} isClientView={isClientView} canRespond={canReport} close={() => setSelectedTicketId(null)} runAction={runAction} busy={busy} notify={notify} />
       ) : null}
       {modal ? (
         <ActionModal modal={modal} data={isClientView ? data : workspace} isClientView={isClientView} selectedRelease={selectedRelease} memberClientId={memberClientId} prefill={prefill} close={() => { setModal(null); setPrefill(null); }} runAction={runAction} busy={busy} notify={notify} />
@@ -573,12 +606,13 @@ function GateRow({ passed, title, detail }: { passed: boolean; title: string; de
   return <div><span className={passed ? "pass" : "block"}>{passed ? <Check size={13} /> : <AlertCircle size={13} />}</span><p><b>{title}</b><small>{detail}</small></p></div>;
 }
 
-function Feedback({ data, tickets, query, setQuery, statusFilter, setStatusFilter, setSelectedTicketId, boardMode, setBoardMode, visibleCount, setVisibleCount, isStaff, runAction }: { data: Workspace; tickets: Ticket[]; query: string; setQuery: (value: string) => void; statusFilter: string; setStatusFilter: (value: string) => void; setSelectedTicketId: (id: string) => void; boardMode: boolean; setBoardMode: (value: boolean) => void; visibleCount: number; setVisibleCount: (value: number) => void; isStaff: boolean; runAction: RunAction }) {
+function Feedback({ data, tickets, query, setQuery, statusFilter, setStatusFilter, setSelectedTicketId, boardMode, setBoardMode, myWork, setMyWork, unreadIds, visibleCount, setVisibleCount, isStaff, runAction }: { data: Workspace; tickets: Ticket[]; query: string; setQuery: (value: string) => void; statusFilter: string; setStatusFilter: (value: string) => void; setSelectedTicketId: (id: string) => void; boardMode: boolean; setBoardMode: (value: boolean) => void; myWork: boolean; setMyWork: (value: boolean) => void; unreadIds: Set<string>; visibleCount: number; setVisibleCount: (value: number) => void; isStaff: boolean; runAction: RunAction }) {
   const paged = tickets.slice(0, visibleCount);
   return <div className="page-content feedback-page">
     <div className="filter-row">
       <label className="search-box"><Search size={16} /><input aria-label="Search feedback" placeholder="Search feedback, project or reporter  ( / )" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
       <label className="filter-select"><span>Status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>All statuses</option>{statusOptions.map((status) => <option key={status}>{status}</option>)}</select></label>
+      <button className={`mywork-toggle ${myWork ? "active" : ""}`} onClick={() => setMyWork(!myWork)} aria-pressed={myWork}><UserCheck size={14} /> My work</button>
       <div className="view-toggle" role="group" aria-label="Layout">
         <button className={boardMode ? "" : "active"} onClick={() => setBoardMode(false)}>List</button>
         <button className={boardMode ? "active" : ""} onClick={() => setBoardMode(true)}>Board</button>
@@ -586,17 +620,17 @@ function Feedback({ data, tickets, query, setQuery, statusFilter, setStatusFilte
       <span className="result-count">{tickets.length} results</span>
     </div>
     {boardMode ? (
-      <FeedbackBoard tickets={tickets} onOpen={setSelectedTicketId} isStaff={isStaff} runAction={runAction} />
+      <FeedbackBoard tickets={tickets} onOpen={setSelectedTicketId} isStaff={isStaff} unreadIds={unreadIds} runAction={runAction} />
     ) : (
       <article className="surface feedback-surface">
-        <FeedbackTable tickets={paged} projects={data.projects} onOpen={setSelectedTicketId} />
+        <FeedbackTable tickets={paged} projects={data.projects} onOpen={setSelectedTicketId} unreadIds={unreadIds} />
         {tickets.length > visibleCount ? <div className="load-more"><button className="secondary-button" onClick={() => setVisibleCount(visibleCount + 50)}>Show {Math.min(50, tickets.length - visibleCount)} more of {tickets.length - visibleCount}</button></div> : null}
       </article>
     )}
   </div>;
 }
 
-function FeedbackBoard({ tickets, onOpen, isStaff, runAction }: { tickets: Ticket[]; onOpen: (id: string) => void; isStaff: boolean; runAction: RunAction }) {
+function FeedbackBoard({ tickets, onOpen, isStaff, unreadIds, runAction }: { tickets: Ticket[]; onOpen: (id: string) => void; isStaff: boolean; unreadIds?: Set<string>; runAction: RunAction }) {
   const [dragOver, setDragOver] = useState<string | null>(null);
   function handleDrop(columnId: string, event: React.DragEvent) {
     event.preventDefault();
@@ -626,7 +660,7 @@ function FeedbackBoard({ tickets, onOpen, isStaff, runAction }: { tickets: Ticke
             return <button key={ticket.id} className="board-card" draggable={isStaff}
               onDragStart={(event) => event.dataTransfer.setData("text/deliveryloop-ticket", ticket.id)}
               onClick={() => onOpen(ticket.id)}>
-              <span className="board-card-top"><i className={`feedback-type ${ticket.type.toLowerCase().replace(" ", "-")}`}><Icon size={14} /></i><small>{ticket.key}</small><em className={`priority-label ${ticket.priority.toLowerCase()}`}>{ticket.priority}</em></span>
+              <span className="board-card-top"><i className={`feedback-type ${ticket.type.toLowerCase().replace(" ", "-")}`}><Icon size={14} /></i><small>{ticket.key}</small>{unreadIds?.has(ticket.id) ? <i className="unread-dot" title="New activity" /> : null}<em className={`priority-label ${ticket.priority.toLowerCase()}`}>{ticket.priority}</em></span>
               <b>{ticket.title}</b>
               <span className="board-card-meta"><StatusBadge value={ticket.status} />{chip ? <SlaChip chip={chip} /> : null}</span>
             </button>;
@@ -642,11 +676,11 @@ function SlaChip({ chip }: { chip: { tone: "client" | "team"; label: string } })
   return <span className={`sla-chip ${chip.tone}`}><Clock3 size={11} />{chip.label}</span>;
 }
 
-function FeedbackTable({ tickets, projects, onOpen, compact = false }: { tickets: Ticket[]; projects: Project[]; onOpen: (id: string) => void; compact?: boolean }) {
+function FeedbackTable({ tickets, projects, onOpen, unreadIds, compact = false }: { tickets: Ticket[]; projects: Project[]; onOpen: (id: string) => void; unreadIds?: Set<string>; compact?: boolean }) {
   return <div className={`feedback-table ${compact ? "compact" : ""}`}><div className="feedback-head"><span>Feedback</span><span>Project</span><span>Status</span><span>Priority</span><span>Owner</span></div>{tickets.length ? tickets.map((ticket) => {
     const project = projects.find((item) => item.id === ticket.project_id); const Icon = feedbackIcons[ticket.type] || MessageCircleQuestion;
     const chip = compact ? null : slaChip(ticket);
-    return <button className="feedback-row" key={ticket.id} onClick={() => onOpen(ticket.id)}><span className="feedback-title"><i className={`feedback-type ${ticket.type.toLowerCase().replace(" ", "-")}`}><Icon size={15} /></i><span><b>{ticket.title}</b><small>{ticket.key} · {ticket.reporter}</small></span></span><span className="project-reference"><b>{project?.code}</b><small>{project?.name}</small></span><span className="status-cell"><StatusBadge value={ticket.status} />{chip ? <SlaChip chip={chip} /> : null}</span><span className={`priority-label ${ticket.priority.toLowerCase()}`}>{ticket.priority}</span><span className="owner-cell"><i>{initials(ticket.assignee)}</i>{ticket.assignee}</span></button>;
+    return <button className="feedback-row" key={ticket.id} onClick={() => onOpen(ticket.id)}><span className="feedback-title"><i className={`feedback-type ${ticket.type.toLowerCase().replace(" ", "-")}`}><Icon size={15} /></i><span><b>{ticket.title}{unreadIds?.has(ticket.id) ? <i className="unread-dot" title="New activity" /> : null}</b><small>{ticket.key} · {ticket.reporter}</small></span></span><span className="project-reference"><b>{project?.code}</b><small>{project?.name}</small></span><span className="status-cell"><StatusBadge value={ticket.status} />{chip ? <SlaChip chip={chip} /> : null}</span><span className={`priority-label ${ticket.priority.toLowerCase()}`}>{ticket.priority}</span><span className="owner-cell"><i>{initials(ticket.assignee)}</i>{ticket.assignee}</span></button>;
   }) : <EmptyState icon={Inbox} title="No feedback in this view" body="Change the filters or report a new issue." />}</div>;
 }
 
@@ -681,7 +715,31 @@ function Settings({ data, actor, openMemberModal, runAction, busy, notify }: { d
       <article className="surface internal-team"><header className="section-header"><div><p>Agency workspace</p><h2>Internal delivery team</h2></div>{actor.role === "agency_admin" ? <button className="secondary-button" onClick={() => openMemberModal("agency")}><UserPlus size={15} /> Add teammate</button> : null}</header><MemberDirectory members={staff} actor={actor} runAction={runAction} busy={busy} notify={notify} /></article>
       <aside className="surface readiness-card"><header><p>Access readiness</p><h2>Client onboarding</h2></header><div className="readiness-number">{activeClientMembers}<span>active client members</span></div><div className="readiness-list"><div><CheckCircle2 size={15} /><span><b>Owner identity secured</b><small>{actor.email}</small></span></div><div><CheckCircle2 size={15} /><span><b>{data.clients.length} client workspaces isolated</b><small>API and attachment access checked server-side</small></span></div><div className={clientAdmins.size === data.clients.length ? "" : "pending"}><AlertCircle size={15} /><span><b>{clientAdmins.size} of {data.clients.length} clients have an admin</b><small>Add one client admin before handing over each portal.</small></span></div></div></aside>
     </section>
+    <TemplatePanel templates={data.templates || []} runAction={runAction} busy={busy} />
   </div>;
+}
+
+function TemplatePanel({ templates, runAction, busy }: { templates: ReplyTemplate[]; runAction: (action: string, payload: ActionPayload, success: string) => Promise<void>; busy: boolean }) {
+  const [adding, setAdding] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    await runAction("createReplyTemplate", { title: field(form, "title"), body: field(form, "body") }, "Reply template saved");
+    setAdding(false);
+  }
+  return <article className="surface template-panel">
+    <header className="section-header"><div><p>Consistent replies</p><h2>Saved reply templates</h2></div>{adding ? null : <button className="secondary-button" onClick={() => setAdding(true)}><Plus size={15} /> New template</button>}</header>
+    <p className="template-hint">Templates appear in the “Insert saved reply” menu on every feedback conversation, so triage answers stay fast and consistent.</p>
+    {adding ? <form className="template-form" onSubmit={submit}>
+      <input name="title" required maxLength={80} placeholder="Template name, e.g. Ask for reproduction steps" />
+      <textarea name="body" required maxLength={2000} placeholder="Thanks for the report! Could you share the exact steps you took before this happened, starting from sign-in?" />
+      <footer><button type="button" className="quiet-button" onClick={() => setAdding(false)}>Cancel</button><button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Save template"}</button></footer>
+    </form> : null}
+    <div className="template-list">
+      {templates.map((template) => <div key={template.id} className="template-row"><div><b>{template.title}</b><small>{template.body.length > 140 ? `${template.body.slice(0, 140)}…` : template.body}</small></div><button aria-label={`Delete template ${template.title}`} title="Delete template" disabled={busy} onClick={() => runAction("deleteReplyTemplate", { templateId: template.id }, "Template removed")}><Trash2 size={14} /></button></div>)}
+      {!templates.length && !adding ? <div className="member-empty"><FileText size={18} /><span><b>No templates yet</b><small>Save your first canned reply for faster triage.</small></span></div> : null}
+    </div>
+  </article>;
 }
 
 function AccountSecurity({ notify }: { notify: (message: string) => void }) {
@@ -745,9 +803,10 @@ function Reports({ data }: { data: Workspace }) {
   return <div className="page-content report-page"><div className="report-actions"><p>Portfolio-wide UAT performance and delivery evidence.</p><button className="secondary-button" onClick={exportCsv}><Download size={15} /> Export CSV</button></div><div className="report-grid"><article className="surface completion-panel"><header className="section-header"><div><p>Portfolio health</p><h2>UAT completion</h2></div><span>{completion}%</span></header><div className="completion-body"><div className="completion-meter"><i style={{ width: `${completion}%` }} /></div><dl><div><dt>Feedback captured</dt><dd>{total}</dd></div><div><dt>Verified or closed</dt><dd>{complete}</dd></div><div><dt>Open blockers</dt><dd>{data.tickets.filter((ticket) => !closedStatuses.has(ticket.status) && ["Critical", "High"].includes(ticket.severity)).length}</dd></div></dl></div></article><article className="surface type-panel"><header className="section-header"><div><p>Scope clarity</p><h2>Feedback by type</h2></div></header><div className="type-bars">{types.map((type) => { const count = data.tickets.filter((ticket) => ticket.type === type).length; return <div key={type}><span><b>{type}</b><em>{count}</em></span><i><u style={{ width: `${total ? (count / total) * 100 : 0}%` }} /></i></div>; })}</div></article></div><article className="surface audit-panel"><header className="section-header"><div><p>Evidence</p><h2>Acceptance trail</h2></div><FileText size={17} /></header><div className="audit-table"><div className="audit-head"><span>Event</span><span>Actor</span><span>Details</span><span>Date</span></div>{data.audit.map((event) => <div key={event.id}><b>{event.action}</b><span>{event.actor}</span><span>{event.details || "—"}</span><time>{formatDate(event.created_at, true)}</time></div>)}</div></article></div>;
 }
 
-function FeedbackDrawer({ ticket, actor, project, release, comments, attachments, audit, siblingTickets, openTicketByKey, assigneeOptions, isClientView, canRespond, close, runAction, busy, notify }: { ticket: Ticket; actor: Actor; project?: Project; release?: Release; comments: Comment[]; attachments: Attachment[]; audit: AuditEvent[]; siblingTickets: Ticket[]; openTicketByKey: (key: string) => void; assigneeOptions: string[]; isClientView: boolean; canRespond: boolean; close: () => void; runAction: RunAction; busy: boolean; notify: (message: string) => void }) {
+function FeedbackDrawer({ ticket, actor, project, release, comments, attachments, audit, siblingTickets, openTicketByKey, assigneeOptions, templates, mentionNames, isClientView, canRespond, close, runAction, busy, notify }: { ticket: Ticket; actor: Actor; project?: Project; release?: Release; comments: Comment[]; attachments: Attachment[]; audit: AuditEvent[]; siblingTickets: Ticket[]; openTicketByKey: (key: string) => void; assigneeOptions: string[]; templates: ReplyTemplate[]; mentionNames: string[]; isClientView: boolean; canRespond: boolean; close: () => void; runAction: RunAction; busy: boolean; notify: (message: string) => void }) {
   const [editing, setEditing] = useState(false);
   const [duplicatePicker, setDuplicatePicker] = useState(false);
+  const [replyBody, setReplyBody] = useState("");
   const visibleComments = comments.filter((comment) => !isClientView || comment.visibility === "public");
   const ticketAttachments = attachments.filter((attachment) => !attachment.comment_id);
   const commentAttachment = (commentId: string) => attachments.find((attachment) => attachment.comment_id === commentId);
@@ -778,7 +837,7 @@ function FeedbackDrawer({ ticket, actor, project, release, comments, attachments
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
-    const body = field(form, "body");
+    const body = replyBody.trim();
     if (!body) return;
     let attachmentKey = "";
     try {
@@ -790,6 +849,11 @@ function FeedbackDrawer({ ticket, actor, project, release, comments, attachments
     }
     await runAction("addComment", { ticketId: ticket.id, body, visibility: isClientView ? "public" : field(form, "visibility") || "public", ...(attachmentKey ? { attachmentKey } : {}) }, "Update added");
     formElement.reset();
+    setReplyBody("");
+  }
+
+  function insertText(text: string) {
+    setReplyBody((current) => current ? `${current.replace(/\s+$/, "")} ${text}` : text);
   }
 
   async function submitEdit(event: FormEvent<HTMLFormElement>) {
@@ -877,7 +941,12 @@ function FeedbackDrawer({ ticket, actor, project, release, comments, attachments
           return <div className={`comment ${comment.visibility}`} key={comment.id}><span className="avatar small">{initials(comment.author)}</span><div><p><b>{comment.author}</b>{comment.visibility === "internal" ? <em>Internal</em> : null}<time>{formatDate(comment.created_at)}</time></p><div>{comment.body}</div>{attachment ? <a className="attachment-link small" href={`/api/uploads/${encodeURIComponent(attachment.key)}`} target="_blank" rel="noreferrer"><Paperclip size={13} /> Attached screenshot <ExternalLink size={12} /></a> : null}</div></div>;
         })}
         {canRespond ? <form className="reply-form" onSubmit={submitReply}>
-          <textarea name="body" placeholder={isClientView ? "Reply to the delivery team" : "Add an update"} required />
+          {!isClientView && templates.length ? <select className="template-picker" value="" aria-label="Insert a saved reply" onChange={(event) => { const template = templates.find((item) => item.id === event.target.value); if (template) insertText(template.body); }}>
+            <option value="" disabled>Insert saved reply…</option>
+            {templates.map((template) => <option key={template.id} value={template.id}>{template.title}</option>)}
+          </select> : null}
+          <textarea name="body" value={replyBody} onChange={(event) => setReplyBody(event.target.value)} placeholder={isClientView ? "Reply to the delivery team" : "Add an update"} required />
+          {mentionNames.length ? <div className="mention-row"><span>Mention</span>{mentionNames.slice(0, 6).map((name) => <button type="button" key={name} className="mention-chip" onClick={() => insertText(`@${name}`)}>@{name}</button>)}</div> : null}
           <label className="reply-attach" title="Attach a screenshot"><Paperclip size={14} /><input name="screenshot" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /><span>Screenshot</span></label>
           {!isClientView ? <label><input type="checkbox" name="visibility" value="internal" /> Internal note</label> : <span />}
           <button className="primary-button" disabled={busy}><Send size={14} /> Send</button>

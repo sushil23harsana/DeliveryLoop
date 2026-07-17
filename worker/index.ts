@@ -1,6 +1,7 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
+import { sendDailyDigests } from "../db/digest";
 import type { AppBindings } from "../app/runtime-env";
 
 // Image security config. SVG sources with .svg extension auto-skip the
@@ -25,6 +26,10 @@ const worker: ExportedHandler<AppBindings> = {
     }
 
     return handler.fetch(request, env, ctx);
+  },
+
+  async scheduled(_controller, _env, ctx) {
+    ctx.waitUntil(sendDailyDigests());
   },
 };
 

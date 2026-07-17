@@ -17,6 +17,7 @@ export type AppBindings = {
     };
   };
   RESEND_API_KEY?: string;
+  SLACK_WEBHOOK_URL?: string;
   UPLOADS?: R2Bucket;
 };
 

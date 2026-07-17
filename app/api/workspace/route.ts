@@ -5,7 +5,9 @@ import {
   createMember,
   createProject,
   createRelease,
+  createReplyTemplate,
   createTicket,
+  deleteReplyTemplate,
   editTicket,
   getWorkspace,
   markDuplicate,
@@ -44,6 +46,8 @@ export async function POST(request: Request) {
       case "withdrawTicket": result = await withdrawTicket(payload, actor); break;
       case "markDuplicate": result = await markDuplicate(payload, actor); break;
       case "addComment": result = await addComment(payload, actor); break;
+      case "createReplyTemplate": result = await createReplyTemplate(payload, actor); break;
+      case "deleteReplyTemplate": result = await deleteReplyTemplate(payload, actor); break;
       case "updateChecklist": result = await updateChecklist(payload, actor); break;
       case "approveRelease": result = await approveRelease(payload, actor); break;
       default: return json({ error: "Unknown action" }, { status: 400 });
