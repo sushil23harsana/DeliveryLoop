@@ -63,8 +63,10 @@ type Attachment = { id: string; ticket_id: string; comment_id: string | null; ke
 type AuditEvent = { id: string; entity_type: string; entity_id: string; action: string; actor: string; details: string; created_at: string };
 type ReplyTemplate = { id: string; title: string; body: string; created_by: string; created_at: string };
 type ScopeVersion = { id: string; project_id: string; version: number; body: string; change_note: string; author: string; author_role: string; created_at: string };
+type ProjectTeamRow = { id: string; project_id: string; member_id: string; added_by: string; created_at: string };
+type DirectoryProject = { id: string; client_id: string; name: string; code: string; stage: string; manager: string; team: string[] };
 type Actor = { id: string; email: string; name: string; role: string; clientId: string | null; isStaff: boolean };
-type Workspace = { clients: Client[]; members: Member[]; projects: Project[]; releases: Release[]; checklist: ChecklistItem[]; tickets: Ticket[]; comments: Comment[]; audit: AuditEvent[]; attachments: Attachment[]; templates: ReplyTemplate[]; scope: ScopeVersion[] };
+type Workspace = { clients: Client[]; members: Member[]; projects: Project[]; releases: Release[]; checklist: ChecklistItem[]; tickets: Ticket[]; comments: Comment[]; audit: AuditEvent[]; attachments: Attachment[]; templates: ReplyTemplate[]; scope: ScopeVersion[]; projectTeam: ProjectTeamRow[]; directory: DirectoryProject[] };
 type View = "overview" | "projects" | "releases" | "feedback" | "clients" | "reports" | "settings";
 type Modal = "feedback" | "project" | "release" | "client" | "member" | null;
 type ActionPayload = Record<string, string | string[]>;
@@ -153,6 +155,8 @@ function scopeWorkspace(data: Workspace, clientId: string | null): Workspace {
     attachments: data.attachments.filter((attachment) => ticketIds.has(attachment.ticket_id)),
     templates: [],
     scope: data.scope.filter((version) => projectIds.has(version.project_id)),
+    projectTeam: [],
+    directory: [],
   };
 }
 
@@ -172,6 +176,7 @@ export function DeliveryLoopApp() {
   const [memberClientId, setMemberClientId] = useState<string | null>(null);
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
   const [scopeProjectId, setScopeProjectId] = useState<string | null>(null);
+  const [teamProjectId, setTeamProjectId] = useState<string | null>(null);
   const [selectedReleaseId, setSelectedReleaseId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("All statuses");
@@ -333,7 +338,12 @@ export function DeliveryLoopApp() {
   const canManageClients = actor.role === "agency_admin";
   const canManageDelivery = actor.role === "agency_admin" || actor.role === "project_manager";
   const navigation = isClientView ? [...clientNavigation, ...(canManageClientMembers ? [clientAdminNavigation] : [])] : staffNavigation;
-  const assigneeOptions = ["Unassigned", ...new Set(fullWorkspace.members.filter((member) => !member.client_id && member.active === "1").map((member) => member.name))];
+  const staffMembers = fullWorkspace.members.filter((member) => !member.client_id && member.active === "1");
+  const assigneesForProject = (projectId: string) => {
+    const teamIds = new Set((fullWorkspace.projectTeam || []).filter((row) => row.project_id === projectId).map((row) => row.member_id));
+    const pool = teamIds.size ? staffMembers.filter((member) => teamIds.has(member.id)) : staffMembers;
+    return ["Unassigned", ...new Set(pool.map((member) => member.name))];
+  };
   const printRelease = printReleaseId ? data.releases.find((release) => release.id === printReleaseId) : null;
 
   const unreadIds = new Set(data.tickets.filter((ticket) => seenMap[ticket.id] !== ticket.updated_at).map((ticket) => ticket.id));
@@ -433,7 +443,7 @@ export function DeliveryLoopApp() {
         {view === "overview" && !isClientView ? (
           <Overview data={data} openTickets={openTickets} blockers={blockers} retest={retest} testingReleases={testingReleases} setView={setView} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} setSelectedTicketId={setSelectedTicketId} setModal={setModal} />
         ) : null}
-        {view === "projects" ? <Projects data={data} isClientView={isClientView} clientById={clientById} setView={setView} setSelectedReleaseId={setSelectedReleaseId} setScopeProjectId={setScopeProjectId} notify={notify} /> : null}
+        {view === "projects" ? <Projects data={data} isClientView={isClientView} canManageDelivery={canManageDelivery && !isClientView} clientById={clientById} setView={setView} setSelectedReleaseId={setSelectedReleaseId} setScopeProjectId={setScopeProjectId} setTeamProjectId={setTeamProjectId} notify={notify} /> : null}
         {view === "releases" ? <Releases data={data} actor={actor} isClientView={isClientView} selectedRelease={selectedRelease} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} runAction={runAction} busy={busy} setPrintReleaseId={setPrintReleaseId} /> : null}
         {view === "feedback" ? <Feedback data={data} tickets={visibleTickets} query={query} setQuery={setQuery} statusFilter={statusFilter} setStatusFilter={setStatusFilter} setSelectedTicketId={setSelectedTicketId} boardMode={boardMode} setBoardMode={setBoardMode} myWork={myWork} setMyWork={setMyWork} unreadIds={unreadIds} visibleCount={visibleCount} setVisibleCount={setVisibleCount} isStaff={actor.isStaff && !previewClientId} runAction={runAction} /> : null}
         {view === "clients" && (!isClientView || canManageClientMembers) ? <Clients data={data} actor={actor} openMemberModal={openMemberModal} runAction={runAction} busy={busy} notify={notify} /> : null}
@@ -442,7 +452,10 @@ export function DeliveryLoopApp() {
       </main>
 
       {selectedTicket ? (
-        <FeedbackDrawer ticket={selectedTicket} actor={actor} project={projectById(selectedTicket.project_id)} release={releaseById(selectedTicket.release_id)} comments={data.comments.filter((comment) => comment.ticket_id === selectedTicket.id)} attachments={data.attachments.filter((attachment) => attachment.ticket_id === selectedTicket.id)} audit={data.audit.filter((event) => event.entity_id === selectedTicket.id)} siblingTickets={data.tickets.filter((item) => item.project_id === selectedTicket.project_id && item.id !== selectedTicket.id)} openTicketByKey={(key) => { const target = data.tickets.find((item) => item.key === key); if (target) setSelectedTicketId(target.id); }} assigneeOptions={assigneeOptions} templates={fullWorkspace.templates || []} mentionNames={[...new Set([...fullWorkspace.members.filter((member) => member.active === "1").map((member) => member.name), selectedTicket.reporter, selectedTicket.assignee])].filter((name) => name && name !== "Unassigned" && name !== actor.name)} isClientView={isClientView} canRespond={canReport} close={() => setSelectedTicketId(null)} runAction={runAction} busy={busy} notify={notify} />
+        <FeedbackDrawer ticket={selectedTicket} actor={actor} project={projectById(selectedTicket.project_id)} release={releaseById(selectedTicket.release_id)} comments={data.comments.filter((comment) => comment.ticket_id === selectedTicket.id)} attachments={data.attachments.filter((attachment) => attachment.ticket_id === selectedTicket.id)} audit={data.audit.filter((event) => event.entity_id === selectedTicket.id)} siblingTickets={data.tickets.filter((item) => item.project_id === selectedTicket.project_id && item.id !== selectedTicket.id)} openTicketByKey={(key) => { const target = data.tickets.find((item) => item.key === key); if (target) setSelectedTicketId(target.id); }} assigneeOptions={(() => { const options = assigneesForProject(selectedTicket.project_id); return options.includes(selectedTicket.assignee) ? options : [...options, selectedTicket.assignee]; })()} templates={fullWorkspace.templates || []} mentionNames={[...new Set([...fullWorkspace.members.filter((member) => member.active === "1").map((member) => member.name), selectedTicket.reporter, selectedTicket.assignee])].filter((name) => name && name !== "Unassigned" && name !== actor.name)} isClientView={isClientView} canRespond={canReport} close={() => setSelectedTicketId(null)} runAction={runAction} busy={busy} notify={notify} />
+      ) : null}
+      {teamProjectId && projectById(teamProjectId) ? (
+        <TeamModal project={projectById(teamProjectId)!} members={fullWorkspace.members} team={(fullWorkspace.projectTeam || []).filter((row) => row.project_id === teamProjectId)} actor={actor} close={() => setTeamProjectId(null)} runAction={runAction} busy={busy} />
       ) : null}
       {scopeProjectId && projectById(scopeProjectId) ? (
         <ScopePanel project={projectById(scopeProjectId)!} versions={(data.scope || []).filter((version) => version.project_id === scopeProjectId)} canEdit={["agency_admin", "project_manager", "client_admin"].includes(actor.role)} isClientView={isClientView} close={() => setScopeProjectId(null)} runAction={runAction} busy={busy} />
@@ -535,7 +548,8 @@ function CircleDotIcon() {
   return <span className="activity-dot" />;
 }
 
-function Projects({ data, isClientView, clientById, setView, setSelectedReleaseId, setScopeProjectId, notify }: { data: Workspace; isClientView: boolean; clientById: (id: string) => Client | undefined; setView: (view: View) => void; setSelectedReleaseId: (id: string) => void; setScopeProjectId: (id: string) => void; notify: (message: string) => void }) {
+function Projects({ data, isClientView, canManageDelivery, clientById, setView, setSelectedReleaseId, setScopeProjectId, setTeamProjectId, notify }: { data: Workspace; isClientView: boolean; canManageDelivery: boolean; clientById: (id: string) => Client | undefined; setView: (view: View) => void; setSelectedReleaseId: (id: string) => void; setScopeProjectId: (id: string) => void; setTeamProjectId: (id: string) => void; notify: (message: string) => void }) {
+  const memberNameById = new Map(data.members.map((member) => [member.id, member.name]));
   async function copyBookmarklet(projectName: string) {
     const origin = window.location.origin;
     const bookmarklet = `javascript:(function(){var u=encodeURIComponent(location.href);var v=encodeURIComponent(innerWidth+' x '+innerHeight);window.open('${origin}/?report=1&url='+u+'&vw='+v,'_blank');})();`;
@@ -549,8 +563,22 @@ function Projects({ data, isClientView, clientById, setView, setSelectedReleaseI
   return <div className="page-content"><div className="project-list">{data.projects.map((project) => {
     const client = clientById(project.client_id); const releases = data.releases.filter((release) => release.project_id === project.id); const tickets = data.tickets.filter((ticket) => ticket.project_id === project.id); const current = releases.find((release) => release.status !== "Approved") || releases[0];
     const scopeVersion = (data.scope || []).filter((version) => version.project_id === project.id).length;
-    return <article className="project-row-card" key={project.id}><div className="project-identity"><span style={{ background: client?.accent }}>{project.code}</span><div><p>{client?.name}</p><h2>{project.name}</h2><small>{project.description}</small></div></div><dl><div><dt>Lead</dt><dd>{project.manager}</dd></div><div><dt>Stage</dt><dd><StatusBadge value={project.stage} /></dd></div><div><dt>Open feedback</dt><dd>{tickets.filter((ticket) => !closedStatuses.has(ticket.status)).length}</dd></div><div><dt>Current release</dt><dd>{current?.version || "—"}</dd></div></dl><div className="row-actions"><button className="quiet-button" title="Agreed scope of work with full version history" onClick={() => setScopeProjectId(project.id)}><FileText size={14} /> Scope of work{scopeVersion ? <em className="scope-version-chip">v{scopeVersion}</em> : null}</button><button className="quiet-button" title="Copy a bookmarklet that opens a prefilled feedback form from any staging page" onClick={() => copyBookmarklet(project.name)}><Copy size={14} /> Capture tool</button>{project.staging_url ? <a href={project.staging_url} target="_blank" rel="noreferrer" className="quiet-button">Staging <ExternalLink size={14} /></a> : null}{current ? <button className="secondary-button" onClick={() => { setSelectedReleaseId(current.id); setView("releases"); }}>View release <ChevronRight size={14} /></button> : null}</div>{isClientView ? <span className="client-access-note"><ShieldCheck size={14} /> Your organisation only</span> : null}</article>;
-  })}</div></div>;
+    const teamNames = (data.projectTeam || []).filter((row) => row.project_id === project.id).map((row) => memberNameById.get(row.member_id)).filter((name): name is string => Boolean(name));
+    return <article className="project-row-card" key={project.id}><div className="project-identity"><span style={{ background: client?.accent }}>{project.code}</span><div><p>{client?.name}</p><h2>{project.name}</h2><small>{project.description}</small></div></div><dl><div><dt>Lead</dt><dd>{project.manager}</dd></div><div><dt>Stage</dt><dd><StatusBadge value={project.stage} /></dd></div><div><dt>Open feedback</dt><dd>{tickets.filter((ticket) => !closedStatuses.has(ticket.status)).length}</dd></div><div><dt>Current release</dt><dd>{current?.version || "—"}</dd></div></dl>{!isClientView ? <div className="project-team-row"><span className="project-team-label"><Users size={13} /> Team</span>{teamNames.length ? teamNames.map((name) => <span key={name} className="team-chip" title={name}><b>{initials(name)}</b><i>{name}</i></span>) : <span className="team-open-note">Open to all teammates</span>}{canManageDelivery ? <button className="quiet-button" onClick={() => setTeamProjectId(project.id)}><UserPlus size={13} /> Manage team</button> : null}</div> : null}<div className="row-actions"><button className="quiet-button" title="Agreed scope of work with full version history" onClick={() => setScopeProjectId(project.id)}><FileText size={14} /> Scope of work{scopeVersion ? <em className="scope-version-chip">v{scopeVersion}</em> : null}</button><button className="quiet-button" title="Copy a bookmarklet that opens a prefilled feedback form from any staging page" onClick={() => copyBookmarklet(project.name)}><Copy size={14} /> Capture tool</button>{project.staging_url ? <a href={project.staging_url} target="_blank" rel="noreferrer" className="quiet-button">Staging <ExternalLink size={14} /></a> : null}{current ? <button className="secondary-button" onClick={() => { setSelectedReleaseId(current.id); setView("releases"); }}>View release <ChevronRight size={14} /></button> : null}</div>{isClientView ? <span className="client-access-note"><ShieldCheck size={14} /> Your organisation only</span> : null}</article>;
+  })}</div>
+  {!isClientView && data.directory?.length ? <section className="project-directory">
+    <header className="section-header"><div><p>Rest of the agency</p><h2>Other projects in progress</h2></div></header>
+    <div className="directory-grid">
+      {data.directory.map((project) => <article key={project.id} className="directory-card">
+        <div className="directory-top"><span className="directory-code">{project.code}</span><StatusBadge value={project.stage} /></div>
+        <h3>{project.name}</h3>
+        <p>{clientById(project.client_id)?.name || "Agency client"} · led by {project.manager}</p>
+        <div className="directory-team">{project.team.length ? project.team.map((name) => <span key={name} className="team-chip" title={name}><b>{initials(name)}</b><i>{name}</i></span>) : <span className="team-open-note">Team not listed</span>}</div>
+        <span className="directory-lock"><LockKeyhole size={12} /> Overview only — you are not on this project&apos;s team</span>
+      </article>)}
+    </div>
+  </section> : null}
+  </div>;
 }
 
 function Releases({ data, actor, isClientView, selectedRelease, setSelectedReleaseId, projectById, clientById, runAction, busy, setPrintReleaseId }: { data: Workspace; actor: Actor; isClientView: boolean; selectedRelease?: Release; setSelectedReleaseId: (id: string) => void; projectById: (id: string) => Project | undefined; clientById: (id: string) => Client | undefined; runAction: RunAction; busy: boolean; setPrintReleaseId: (id: string | null) => void }) {
@@ -684,9 +712,9 @@ function FeedbackBoard({ tickets, onOpen, isStaff, unreadIds, runAction }: { tic
             return <button key={ticket.id} className="board-card" draggable={isStaff}
               onDragStart={(event) => event.dataTransfer.setData("text/deliveryloop-ticket", ticket.id)}
               onClick={() => onOpen(ticket.id)}>
-              <span className="board-card-top"><i className={`feedback-type ${ticket.type.toLowerCase().replace(" ", "-")}`}><Icon size={14} /></i><small>{ticket.key}</small>{unreadIds?.has(ticket.id) ? <i className="unread-dot" title="New activity" /> : null}<em className={`priority-label ${ticket.priority.toLowerCase()}`}>{ticket.priority}</em></span>
+              <span className="board-card-top"><i className={`feedback-type ${ticket.type.toLowerCase().replace(" ", "-")}`}><Icon size={14} /></i><small>{ticket.key}</small>{unreadIds?.has(ticket.id) ? <i className="unread-dot" title="New activity" /> : null}<em className={`severity-flag ${ticket.severity.toLowerCase()}`} title={`${ticket.severity} severity`}>{ticket.severity}</em><em className={`priority-label ${ticket.priority.toLowerCase()}`}>{ticket.priority}</em></span>
               <b>{ticket.title}</b>
-              <span className="board-card-meta"><StatusBadge value={ticket.status} />{chip ? <SlaChip chip={chip} /> : null}</span>
+              <span className="board-card-meta"><StatusBadge value={ticket.status} />{chip ? <SlaChip chip={chip} /> : null}<span className={`board-assignee ${ticket.assignee === "Unassigned" ? "empty" : ""}`} title={ticket.assignee === "Unassigned" ? "Unassigned — open the card to assign" : `Assigned to ${ticket.assignee}`}>{ticket.assignee === "Unassigned" ? "?" : initials(ticket.assignee)}</span></span>
             </button>;
           })}
           {!columnTickets.length ? <div className="board-empty">Nothing here</div> : null}
@@ -980,6 +1008,39 @@ function FeedbackDrawer({ ticket, actor, project, release, comments, attachments
       </section>
     </div>
   </aside></div>;
+}
+
+function TeamModal({ project, members, team, actor, close, runAction, busy }: { project: Project; members: Member[]; team: ProjectTeamRow[]; actor: Actor; close: () => void; runAction: RunAction; busy: boolean }) {
+  const staff = members.filter((member) => !member.client_id && member.active === "1");
+  const [selected, setSelected] = useState<string[]>(team.map((row) => row.member_id));
+  function toggle(memberId: string) {
+    setSelected((current) => current.includes(memberId) ? current.filter((item) => item !== memberId) : [...current, memberId]);
+  }
+  async function save() {
+    const ok = await runAction("updateProjectTeam", { projectId: project.id, memberIds: selected }, selected.length ? "Project team updated" : "Project opened to all teammates");
+    if (ok) close();
+  }
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
+    <section className="modal-card team-card" role="dialog" aria-modal="true" aria-label={`Project team for ${project.name}`}>
+      <header><div><p>Project team</p><h2>{project.name}</h2></div><button onClick={close} aria-label="Close"><X size={19} /></button></header>
+      <div className="team-shell">
+        <div className="modal-callout"><ShieldCheck size={17} /><span>Only admins and the teammates selected here can open this project&apos;s releases and feedback. Everyone else sees an overview card. Leave everyone unticked to keep the project open to the whole team.</span></div>
+        <div className="team-member-list">
+          {staff.map((member) => {
+            const isSelf = member.id === actor.id;
+            const locked = isSelf && actor.role === "project_manager" && selected.includes(member.id) && selected.length > 1;
+            return <label key={member.id} className={`team-member-row ${selected.includes(member.id) ? "picked" : ""}`}>
+              <input type="checkbox" checked={selected.includes(member.id)} disabled={busy || locked} onChange={() => toggle(member.id)} />
+              <span className="team-member-avatar">{initials(member.name)}</span>
+              <span className="team-member-info"><b>{member.name}{isSelf ? " (you)" : ""}</b><small>{roleLabel(member.role)} · {member.email}</small></span>
+            </label>;
+          })}
+          {!staff.length ? <div className="member-empty"><Users size={18} /><span><b>No internal teammates yet</b><small>Add teammates in Team &amp; security first.</small></span></div> : null}
+        </div>
+        <footer className="team-footer"><span>{selected.length ? `${selected.length} on the team` : "Open to all teammates"}</span><div><button type="button" className="quiet-button" onClick={close}>Cancel</button><button className="primary-button" disabled={busy} onClick={() => void save()}>{busy ? "Saving…" : "Save team"}</button></div></footer>
+      </div>
+    </section>
+  </div>;
 }
 
 type DiffLine = { kind: "same" | "add" | "del"; text: string };

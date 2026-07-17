@@ -177,6 +177,14 @@ export const replyTemplates = sqliteTable("reply_templates", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
+export const projectMembers = sqliteTable("project_members", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  memberId: text("member_id").notNull(),
+  addedBy: text("added_by").notNull().default(""),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [uniqueIndex("project_members_project_member_idx").on(table.projectId, table.memberId)]);
+
 export const scopeVersions = sqliteTable("scope_versions", {
   id: text("id").primaryKey(),
   projectId: text("project_id").notNull(),

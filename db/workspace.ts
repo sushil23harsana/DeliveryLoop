@@ -113,6 +113,10 @@ const tableStatements = [
     id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL,
     created_by TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
+  `CREATE TABLE IF NOT EXISTS project_members (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, member_id TEXT NOT NULL,
+    added_by TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
   `CREATE TABLE IF NOT EXISTS scope_versions (
     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, version INTEGER NOT NULL,
     body TEXT NOT NULL, change_note TEXT NOT NULL DEFAULT '',
@@ -134,6 +138,7 @@ const tableStatements = [
   `CREATE INDEX IF NOT EXISTS tickets_status_idx ON tickets(status)`,
   `CREATE INDEX IF NOT EXISTS comments_ticket_idx ON comments(ticket_id)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS scope_versions_project_version_idx ON scope_versions(project_id, version)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS project_members_project_member_idx ON project_members(project_id, member_id)`,
   `CREATE INDEX IF NOT EXISTS attachments_ticket_idx ON attachments(ticket_id)`,
 ];
 
@@ -236,9 +241,13 @@ async function ensureMemberSeeds(db: D1Database) {
   if (count?.count) return;
   await db.batch([
     db.prepare("INSERT INTO members (id,email,name,role,client_id) VALUES (?,?,?,?,?)").bind("member-demo-admin", "demo@deliveryloop.local", "Demo Operator", "agency_admin", null),
+    db.prepare("INSERT INTO members (id,email,name,role,client_id) VALUES (?,?,?,?,?)").bind("member-pm-aarav", "aarav@agency.demo", "Aarav Patel", "project_manager", null),
+    db.prepare("INSERT INTO members (id,email,name,role,client_id) VALUES (?,?,?,?,?)").bind("member-dev-isha", "isha@agency.demo", "Isha Verma", "developer", null),
     db.prepare("INSERT INTO members (id,email,name,role,client_id) VALUES (?,?,?,?,?)").bind("member-northstar", "maya@northstar.demo", "Maya Chen", "client_admin", "client-northstar"),
     db.prepare("INSERT INTO members (id,email,name,role,client_id) VALUES (?,?,?,?,?)").bind("member-atlas", "rohan@atlas.demo", "Rohan Mehta", "client_admin", "client-atlas"),
     db.prepare("INSERT INTO members (id,email,name,role,client_id) VALUES (?,?,?,?,?)").bind("member-veda", "anika@veda.demo", "Anika Rao", "client_admin", "client-veda"),
+    db.prepare("INSERT INTO project_members (id,project_id,member_id,added_by) VALUES (?,?,?,?)").bind("pteam-1", "project-northstar", "member-pm-aarav", "Demo Operator"),
+    db.prepare("INSERT INTO project_members (id,project_id,member_id,added_by) VALUES (?,?,?,?)").bind("pteam-2", "project-northstar", "member-dev-isha", "Demo Operator"),
   ]);
 }
 
@@ -337,7 +346,7 @@ export async function resolveActor(identity: { email: string; name: string } | n
 
 export async function getWorkspace(actor: Actor) {
   const db = await ensureDatabase();
-  const [clients, projects, releases, checklist, tickets, comments, audit, members, attachments, templates, scope] = await Promise.all([
+  const [clients, projects, releases, checklist, tickets, comments, audit, members, attachments, templates, scope, team] = await Promise.all([
     db.prepare("SELECT * FROM clients ORDER BY created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM projects ORDER BY created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM releases ORDER BY due_date ASC").all<Record<string, unknown>>(),
@@ -355,10 +364,48 @@ export async function getWorkspace(actor: Actor) {
     // Fail-soft so a deploy that lands before migration 0008 cannot take the
     // whole workspace down over the optional scope-of-work table.
     db.prepare("SELECT * FROM scope_versions ORDER BY project_id ASC, version ASC").all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] })),
+    db.prepare("SELECT * FROM project_members ORDER BY created_at ASC").all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] })),
   ]);
 
   if (actor.isStaff) {
-    return { clients: clients.results, projects: projects.results, releases: releases.results, checklist: checklist.results, tickets: tickets.results, comments: comments.results, audit: audit.results, members: members.results, attachments: attachments.results, templates: templates.results, scope: scope.results };
+    const teamRows = team.results as { project_id: string; member_id: string }[];
+    if (actor.role === "agency_admin") {
+      return { clients: clients.results, projects: projects.results, releases: releases.results, checklist: checklist.results, tickets: tickets.results, comments: comments.results, audit: audit.results, members: members.results, attachments: attachments.results, templates: templates.results, scope: scope.results, projectTeam: team.results, directory: [] as Record<string, unknown>[] };
+    }
+    // Project managers and developers get full detail only for projects whose
+    // team they are on. Projects with no team assigned stay open to everyone.
+    const myProjectIds = new Set(teamRows.filter((row) => row.member_id === actor.id).map((row) => row.project_id));
+    const teamedProjectIds = new Set(teamRows.map((row) => row.project_id));
+    const accessible = projects.results.filter((project) => !teamedProjectIds.has(project.id as string) || myProjectIds.has(project.id as string));
+    const accessibleIds = new Set(accessible.map((project) => project.id));
+    const memberNameById = new Map(members.results.map((member) => [member.id, member.name]));
+    const directory = projects.results.filter((project) => !accessibleIds.has(project.id)).map((project) => ({
+      id: project.id, client_id: project.client_id, name: project.name, code: project.code, stage: project.stage, manager: project.manager,
+      team: teamRows.filter((row) => row.project_id === project.id).map((row) => memberNameById.get(row.member_id)).filter(Boolean),
+    }));
+    const staffReleases = releases.results.filter((release) => accessibleIds.has(release.project_id));
+    const staffReleaseIds = new Set(staffReleases.map((release) => release.id));
+    const staffTickets = tickets.results.filter((ticket) => accessibleIds.has(ticket.project_id));
+    const staffTicketIds = new Set(staffTickets.map((ticket) => ticket.id));
+    return {
+      clients: clients.results,
+      projects: accessible,
+      releases: staffReleases,
+      checklist: checklist.results.filter((item) => staffReleaseIds.has(item.release_id)),
+      tickets: staffTickets,
+      comments: comments.results.filter((comment) => staffTicketIds.has(comment.ticket_id)),
+      audit: audit.results.filter((event) =>
+        (event.entity_type === "ticket" && staffTicketIds.has(event.entity_id)) ||
+        (event.entity_type === "release" && staffReleaseIds.has(event.entity_id)) ||
+        ((event.entity_type === "scope" || event.entity_type === "project") && accessibleIds.has(event.entity_id)) ||
+        !["ticket", "release", "scope", "project"].includes(event.entity_type as string)),
+      members: members.results,
+      attachments: attachments.results.filter((attachment) => staffTicketIds.has(attachment.ticket_id)),
+      templates: templates.results,
+      scope: scope.results.filter((version) => accessibleIds.has(version.project_id)),
+      projectTeam: team.results.filter((row) => accessibleIds.has(row.project_id)),
+      directory,
+    };
   }
 
   if (!actor.clientId) throw new AccessError("Client membership is incomplete", 403);
@@ -386,6 +433,8 @@ export async function getWorkspace(actor: Actor) {
     attachments: attachments.results.filter((attachment) => ticketIds.has(attachment.ticket_id)),
     templates: [],
     scope: scope.results.filter((version) => projectIds.has(version.project_id)),
+    projectTeam: [] as Record<string, unknown>[],
+    directory: [] as Record<string, unknown>[],
   };
 }
 
@@ -497,7 +546,16 @@ async function projectClientId(db: D1Database, projectId: string) {
 }
 
 async function assertProjectAccess(db: D1Database, actor: Actor, projectId: string) {
-  if (actor.isStaff) return;
+  if (actor.isStaff) {
+    if (actor.role === "agency_admin") return;
+    // Projects with no assigned team stay open to every teammate; once a team
+    // exists, only its members (and admins) can work on the project.
+    const rows = await db.prepare("SELECT member_id FROM project_members WHERE project_id = ?")
+      .bind(projectId).all<{ member_id: string }>().catch(() => null);
+    if (!rows || !rows.results.length) return;
+    if (!rows.results.some((row) => row.member_id === actor.id)) throw new AccessError("You are not on this project's team");
+    return;
+  }
   if ((await projectClientId(db, projectId)) !== actor.clientId) throw new AccessError("You do not have access to this project");
 }
 
@@ -651,6 +709,7 @@ export async function createRelease(input: Record<string, string> & { checklist?
   const projectId = required(input, "projectId", "Project", 100);
   const project = await db.prepare("SELECT id FROM projects WHERE id = ?").bind(projectId).first<{ id: string }>();
   if (!project) throw new AccessError("Project not found", 404);
+  await assertProjectAccess(db, actor, projectId);
   const name = required(input, "name", "Release name", 160);
   const version = required(input, "version", "Version", 40);
   const build = required(input, "build", "Build", 80);
@@ -859,6 +918,31 @@ export async function deleteReplyTemplate(input: Record<string, string>, actor: 
   await enforceRateLimit(actor, "template:manage", 60, 60);
   await db.prepare("DELETE FROM reply_templates WHERE id = ?").bind(templateId).run();
   await audit(db, "template", templateId, "Reply template removed", actor, template.title);
+}
+
+export async function updateProjectTeam(input: Record<string, string> & { memberIds?: string[] }, actor: Actor) {
+  requireRole(actor, ["agency_admin", "project_manager"], "Only administrators and project managers can manage project teams");
+  const db = await ensureDatabase();
+  const projectId = required(input, "projectId", "Project", 100);
+  const project = await db.prepare("SELECT name FROM projects WHERE id = ?").bind(projectId).first<{ name: string }>();
+  if (!project) throw new AccessError("Project not found", 404);
+  await assertProjectAccess(db, actor, projectId);
+  const memberIds = [...new Set((Array.isArray(input.memberIds) ? input.memberIds : []).map(String))];
+  if (memberIds.length > 30) throw new AccessError("A project team can have at most 30 members", 400);
+  // A project manager setting a team is always part of it, so they cannot
+  // lock themselves out of the project they are configuring.
+  if (actor.role === "project_manager" && memberIds.length && !memberIds.includes(actor.id)) memberIds.push(actor.id);
+  const staff = await db.prepare("SELECT id,name FROM members WHERE client_id IS NULL AND active = '1'").all<{ id: string; name: string }>();
+  const staffById = new Map(staff.results.map((member) => [member.id, member.name]));
+  for (const memberId of memberIds) {
+    if (!staffById.has(memberId)) throw new AccessError("Project teams can only contain active internal teammates", 400);
+  }
+  await enforceRateLimit(actor, "project:team", 60, 60);
+  await db.batch([
+    db.prepare("DELETE FROM project_members WHERE project_id = ?").bind(projectId),
+    ...memberIds.map((memberId) => db.prepare("INSERT INTO project_members (id,project_id,member_id,added_by) VALUES (?,?,?,?)").bind(id("pteam"), projectId, memberId, actor.name)),
+  ]);
+  await audit(db, "project", projectId, "Project team updated", actor, memberIds.length ? memberIds.map((memberId) => staffById.get(memberId)).join(", ") : "Team cleared — open to all teammates");
 }
 
 export async function saveScope(input: Record<string, string>, actor: Actor) {

@@ -15,6 +15,7 @@ import {
   saveScope,
   updateChecklist,
   updateMember,
+  updateProjectTeam,
   updateTicket,
   withdrawTicket,
 } from "../../../db/workspace";
@@ -40,6 +41,7 @@ export async function POST(request: Request) {
       case "resendMemberInvite": result = await resendMemberInvite(payload, actor); break;
       case "updateMember": result = await updateMember(payload, actor); break;
       case "createProject": result = await createProject(payload, actor); break;
+      case "updateProjectTeam": result = await updateProjectTeam(payload, actor); break;
       case "createRelease": result = await createRelease(payload, actor); break;
       case "createTicket": result = await createTicket(payload, actor); break;
       case "updateTicket": result = await updateTicket(payload, actor); break;

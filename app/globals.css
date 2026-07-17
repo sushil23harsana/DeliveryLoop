@@ -258,6 +258,43 @@ strong, b, dd, .summary-strip strong, .readiness-number { font-variant-numeric: 
 .template-row > button:hover { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger); }
 
 .scope-version-chip { min-width: 24px; margin-left: 2px; padding: 2px 6px; display: inline-grid; place-items: center; border-radius: 9px; background: var(--brand-chip); color: var(--brand-dark); font-size: 10px; font-style: normal; font-weight: 700; }
+
+.project-team-row { margin-top: 2px; display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.project-team-label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+.team-chip { height: 26px; padding: 0 10px 0 3px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); font-size: 11.5px; font-weight: 600; color: var(--ink-soft); }
+.team-chip b { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; background: var(--brand-chip); color: var(--brand-dark); font-size: 8.5px; font-weight: 750; }
+.team-chip i { font-style: normal; }
+.team-open-note { color: var(--muted); font-size: 11.5px; font-style: italic; }
+.project-team-row > .quiet-button { min-height: 26px; padding: 0 9px; font-size: 11.5px; }
+.project-directory { margin-top: 26px; }
+.directory-grid { margin-top: 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.directory-card { padding: 15px 16px; display: grid; gap: 8px; border: 1px dashed var(--line-strong); border-radius: var(--radius); background: var(--surface-soft); }
+.directory-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.directory-code { padding: 4px 8px; border-radius: 7px; background: var(--chip-bg); color: var(--ink-soft); font-size: 11px; font-weight: 750; letter-spacing: 0.04em; }
+.directory-card h3 { margin: 0; font-size: 14px; }
+.directory-card > p { margin: 0; color: var(--muted); font-size: 12px; }
+.directory-team { display: flex; flex-wrap: wrap; gap: 6px; }
+.directory-lock { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.team-card { width: min(560px, 100%); }
+.team-shell { padding: 16px 24px 20px; display: grid; gap: 14px; }
+.team-member-list { display: grid; gap: 8px; max-height: 340px; overflow-y: auto; }
+.team-member-row { padding: 10px 12px; display: flex; align-items: center; gap: 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); cursor: pointer; transition: border-color 0.15s var(--ease), background 0.15s var(--ease); }
+.team-member-row:hover { background: var(--surface-hover); }
+.team-member-row.picked { border-color: var(--brand-line); background: var(--brand-soft); }
+.team-member-row input { width: 15px; height: 15px; flex: none; accent-color: var(--brand); cursor: pointer; }
+.team-member-avatar { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border-radius: 50%; background: var(--chip-bg); color: var(--ink-soft); font-size: 11px; font-weight: 750; }
+.team-member-row.picked .team-member-avatar { background: var(--brand-chip); color: var(--brand-dark); }
+.team-member-info { min-width: 0; flex: 1; }
+.team-member-info b { display: block; font-size: 12.5px; }
+.team-member-info small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.team-footer > span { color: var(--muted); font-size: 12px; font-weight: 600; }
+.team-footer > div { display: flex; gap: 8px; }
+.severity-flag { padding: 2px 7px; border-radius: 9px; background: var(--chip-bg); color: var(--ink-soft); font-size: 10px; font-style: normal; font-weight: 700; }
+.severity-flag.critical, .severity-flag.high { background: var(--danger-soft); color: var(--danger); }
+.severity-flag.medium { background: var(--warning-soft); color: var(--warning); }
+.board-assignee { width: 24px; height: 24px; margin-left: auto; display: grid; place-items: center; border-radius: 50%; background: var(--brand-chip); color: var(--brand-dark); font-size: 9.5px; font-weight: 750; flex: none; }
+.board-assignee.empty { background: var(--chip-bg); color: var(--muted); border: 1px dashed var(--line-strong); }
 .scope-card { width: min(880px, 100%); }
 .scope-shell { padding: 16px 24px 24px; }
 .scope-tabs { margin-bottom: 16px; padding: 3px; display: inline-flex; gap: 2px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); }
