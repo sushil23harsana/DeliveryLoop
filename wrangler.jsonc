@@ -10,7 +10,10 @@
   "upload_source_maps": true,
   "assets": {
     "binding": "ASSETS",
-    "run_worker_first": true
+    // Hashed static assets are served directly; the worker cannot serve them
+    // (the vinext handler has no ASSETS fallback, so worker-first on /assets/*
+    // returns 404). API routes always run the worker for auth and no-store.
+    "run_worker_first": ["/api/*"]
   },
   "images": {
     "binding": "IMAGES"
