@@ -35,15 +35,12 @@
       "migrations_dir": "./drizzle"
     }
   ],
-  // R2 is not enabled on this Cloudflare account yet (dashboard > R2 > enable).
-  // Once enabled: `npx wrangler r2 bucket create deliveryloop-uploads`,
-  // uncomment this block and redeploy to turn on screenshot uploads.
-  // "r2_buckets": [
-  //   {
-  //     "binding": "UPLOADS",
-  //     "bucket_name": "deliveryloop-uploads"
-  //   }
-  // ],
+  "r2_buckets": [
+    {
+      "binding": "UPLOADS",
+      "bucket_name": "deliveryloop-uploads"
+    }
+  ],
   "triggers": {
     // 03:30 UTC = 09:00 IST — daily digest emails before the workday starts.
     "crons": ["30 3 * * *"]
