@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { queueInvitationEmail } from "../app/email";
+import { queueInvitationEmail, queueNotificationEmail } from "../app/email";
 
 type Bindings = { APP_ENV?: string; DB: D1Database; UPLOADS?: R2Bucket; BOOTSTRAP_ADMIN_EMAIL?: string };
 
@@ -96,8 +96,13 @@ const tableStatements = [
     reporter TEXT NOT NULL, assignee TEXT NOT NULL DEFAULT 'Unassigned',
     page_url TEXT NOT NULL DEFAULT '', browser TEXT NOT NULL DEFAULT '',
     viewport TEXT NOT NULL DEFAULT '', build TEXT NOT NULL DEFAULT '',
-    attachment_key TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    attachment_key TEXT, duplicate_of TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS attachments (
+    id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL, comment_id TEXT,
+    key TEXT NOT NULL, uploaded_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE TABLE IF NOT EXISTS comments (
     id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL, author TEXT NOT NULL,
@@ -118,6 +123,7 @@ const tableStatements = [
   `CREATE INDEX IF NOT EXISTS tickets_release_idx ON tickets(release_id)`,
   `CREATE INDEX IF NOT EXISTS tickets_status_idx ON tickets(status)`,
   `CREATE INDEX IF NOT EXISTS comments_ticket_idx ON comments(ticket_id)`,
+  `CREATE INDEX IF NOT EXISTS attachments_ticket_idx ON attachments(ticket_id)`,
 ];
 
 function id(prefix: string) {
@@ -130,7 +136,7 @@ const MEMBER_ROLES = new Set([...STAFF_ROLES, ...CLIENT_ROLES]);
 const TICKET_TYPES = new Set(["Bug", "Change request", "Content", "Question"]);
 const SEVERITIES = new Set(["Critical", "High", "Medium", "Low"]);
 const PRIORITIES = new Set(["Urgent", "High", "Normal", "Low"]);
-const TICKET_STATUSES = new Set(["Submitted", "Triaged", "In progress", "Needs information", "Approval required", "Ready for retest", "Verified", "Closed", "Deferred", "Rejected / out of scope", "Reopened"]);
+const TICKET_STATUSES = new Set(["Submitted", "Triaged", "In progress", "Needs information", "Approval required", "Ready for retest", "Verified", "Closed", "Deferred", "Rejected / out of scope", "Reopened", "Withdrawn"]);
 const CHECK_STATES = new Set(["Not tested", "Passed", "Failed"]);
 
 function required(input: Record<string, string>, key: string, label: string, max = 500) {
@@ -187,6 +193,7 @@ export async function ensureDatabase() {
   if (bindings().APP_ENV === "production") return db;
   await db.batch(tableStatements.map((statement) => db.prepare(statement)));
   await ensureMemberColumns(db);
+  await ensureTicketColumns(db);
   const clients = await db.prepare("SELECT COUNT(*) AS count FROM clients").first<{ count: number }>();
   if (!clients?.count) await seedDatabase(db);
   await ensureMemberSeeds(db);
@@ -205,6 +212,12 @@ async function ensureMemberColumns(db: D1Database) {
   for (const [name, statement] of additions) {
     if (!existing.has(name)) await db.prepare(statement).run();
   }
+}
+
+async function ensureTicketColumns(db: D1Database) {
+  const columns = await db.prepare("PRAGMA table_info(tickets)").all<{ name: string }>();
+  const existing = new Set(columns.results.map((column) => column.name));
+  if (!existing.has("duplicate_of")) await db.prepare("ALTER TABLE tickets ADD COLUMN duplicate_of TEXT").run();
 }
 
 async function ensureMemberSeeds(db: D1Database) {
@@ -306,19 +319,20 @@ export async function resolveActor(identity: { email: string; name: string } | n
 
 export async function getWorkspace(actor: Actor) {
   const db = await ensureDatabase();
-  const [clients, projects, releases, checklist, tickets, comments, audit, members] = await Promise.all([
+  const [clients, projects, releases, checklist, tickets, comments, audit, members, attachments] = await Promise.all([
     db.prepare("SELECT * FROM clients ORDER BY created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM projects ORDER BY created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM releases ORDER BY due_date ASC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM checklist_items ORDER BY created_at ASC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM tickets ORDER BY updated_at DESC, created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM comments ORDER BY created_at ASC").all<Record<string, unknown>>(),
-    db.prepare("SELECT * FROM audit_events ORDER BY created_at DESC LIMIT 50").all<Record<string, unknown>>(),
+    db.prepare("SELECT * FROM audit_events ORDER BY created_at DESC LIMIT 200").all<Record<string, unknown>>(),
     db.prepare("SELECT id,email,name,role,client_id,active,invited_by,invited_at,last_seen_at,updated_at,created_at FROM members ORDER BY created_at DESC").all<Record<string, unknown>>(),
+    db.prepare("SELECT * FROM attachments ORDER BY created_at ASC").all<Record<string, unknown>>(),
   ]);
 
   if (actor.isStaff) {
-    return { clients: clients.results, projects: projects.results, releases: releases.results, checklist: checklist.results, tickets: tickets.results, comments: comments.results, audit: audit.results, members: members.results };
+    return { clients: clients.results, projects: projects.results, releases: releases.results, checklist: checklist.results, tickets: tickets.results, comments: comments.results, audit: audit.results, members: members.results, attachments: attachments.results };
   }
 
   if (!actor.clientId) throw new AccessError("Client membership is incomplete", 403);
@@ -342,12 +356,62 @@ export async function getWorkspace(actor: Actor) {
     comments: comments.results.filter((comment) => ticketIds.has(comment.ticket_id) && comment.visibility === "public"),
     audit: scopedAudit,
     members: actor.role === "client_admin" ? members.results.filter((member) => member.client_id === actor.clientId) : [],
+    attachments: attachments.results.filter((attachment) => ticketIds.has(attachment.ticket_id)),
   };
 }
 
 async function audit(db: D1Database, entityType: string, entityId: string, action: string, actor: Actor, details = "") {
   await db.prepare("INSERT INTO audit_events (id,entity_type,entity_id,action,actor,details) VALUES (?,?,?,?,?,?)")
     .bind(id("audit"), entityType, entityId, action, actor.name, details).run();
+}
+
+async function staffEmails(db: D1Database, exclude: string) {
+  const rows = await db.prepare("SELECT email FROM members WHERE client_id IS NULL AND active = '1' AND role IN ('agency_admin','project_manager')")
+    .all<{ email: string }>();
+  return rows.results.map((row) => row.email).filter((email) => email.toLowerCase() !== exclude.toLowerCase());
+}
+
+async function clientSideEmails(db: D1Database, clientId: string, reporter: string, exclude: string) {
+  const rows = await db.prepare("SELECT email,name,role FROM members WHERE client_id = ? AND active = '1' AND role IN ('client_admin','client_tester')")
+    .all<{ email: string; name: string; role: string }>();
+  return rows.results
+    .filter((row) => row.role === "client_admin" || row.name === reporter)
+    .map((row) => row.email)
+    .filter((email) => email.toLowerCase() !== exclude.toLowerCase());
+}
+
+type TicketNotifyKind = "created" | "retest" | "reopened" | "verified" | "comment" | "withdrawn";
+
+async function queueTicketNotification(db: D1Database, actor: Actor, ticketId: string, kind: TicketNotifyKind) {
+  try {
+    const ticket = await db.prepare(`SELECT t.key, t.title, t.reporter, p.client_id, p.name AS project_name
+      FROM tickets t JOIN projects p ON p.id = t.project_id WHERE t.id = ?`)
+      .bind(ticketId).first<{ key: string; title: string; reporter: string; client_id: string; project_name: string }>();
+    if (!ticket) return;
+    const toClientSide = kind === "retest" || (actor.isStaff && (kind === "created" || kind === "comment" || kind === "withdrawn"));
+    const recipients = toClientSide
+      ? await clientSideEmails(db, ticket.client_id, ticket.reporter, actor.email)
+      : await staffEmails(db, actor.email);
+    const label = `“${ticket.title}” (${ticket.key})`;
+    const content: Record<TicketNotifyKind, { subject: string; heading: string; copy: string }> = {
+      created: { subject: `New feedback ${ticket.key}: ${ticket.title}`, heading: "New feedback reported", copy: `${actor.name} reported ${label} on ${ticket.project_name}.` },
+      retest: { subject: `${ticket.key} is ready to retest`, heading: "A fix is ready to retest", copy: `${label} on ${ticket.project_name} has a fix waiting for your confirmation.` },
+      reopened: { subject: `${ticket.key} was reopened`, heading: "Feedback reopened after retest", copy: `${actor.name} retested ${label} on ${ticket.project_name} and the problem is still present.` },
+      verified: { subject: `${ticket.key} verified by the client`, heading: "Fix verified", copy: `${actor.name} confirmed the fix for ${label} on ${ticket.project_name}.` },
+      comment: { subject: `New reply on ${ticket.key}`, heading: "New reply on feedback", copy: `${actor.name} replied on ${label} on ${ticket.project_name}.` },
+      withdrawn: { subject: `${ticket.key} was withdrawn`, heading: "Feedback withdrawn", copy: `${actor.name} withdrew ${label} on ${ticket.project_name}.` },
+    };
+    await queueNotificationEmail({
+      recipients,
+      ...content[kind],
+      eyebrow: "DeliveryLoop update",
+      button: "Open feedback",
+      path: `/?ticket=${encodeURIComponent(ticket.key)}`,
+      eventId: `${kind}:${ticketId}:${crypto.randomUUID()}`,
+    });
+  } catch (error) {
+    console.error(JSON.stringify({ event: "ticket_notification_failed", message: error instanceof Error ? error.message : String(error) }));
+  }
 }
 
 export async function enforceRateLimit(actor: Actor, action: string, limit: number, windowMinutes: number) {
@@ -544,7 +608,15 @@ export async function createRelease(input: Record<string, string> & { checklist?
   return releaseId;
 }
 
-export async function createTicket(input: Record<string, string>, actor: Actor) {
+async function validateAttachmentKey(key: string, actor: Actor) {
+  if (!/^[a-f0-9-]+\.(png|jpg|webp|gif)$/i.test(key)) throw new AccessError("Invalid screenshot reference", 400);
+  const upload = await getUploads().head(key);
+  if (!upload) throw new AccessError("Screenshot was not found", 400);
+  const uploadedBy = upload.customMetadata?.uploadedBy;
+  if (uploadedBy && uploadedBy !== actor.id) throw new AccessError("Screenshot belongs to another member");
+}
+
+export async function createTicket(input: Record<string, string> & { attachmentKeys?: string[] }, actor: Actor) {
   const db = await ensureDatabase();
   if (!canSubmitFeedback(actor)) throw new AccessError("Your role has read-only access");
   const projectId = required(input, "projectId", "Project", 100);
@@ -562,14 +634,9 @@ export async function createTicket(input: Record<string, string>, actor: Actor) 
   const browser = optional(input, "browser", 500);
   const viewport = optional(input, "viewport", 80);
   const build = optional(input, "build", 80);
-  const attachmentKey = optional(input, "attachmentKey", 100) || null;
-  if (attachmentKey && !/^[a-f0-9-]+\.(png|jpg|webp|gif)$/i.test(attachmentKey)) throw new AccessError("Invalid screenshot reference", 400);
-  if (attachmentKey) {
-    const upload = await getUploads().head(attachmentKey);
-    if (!upload) throw new AccessError("Screenshot was not found", 400);
-    const uploadedBy = upload.customMetadata?.uploadedBy;
-    if (uploadedBy && uploadedBy !== actor.id) throw new AccessError("Screenshot belongs to another member");
-  }
+  const legacyKey = optional(input, "attachmentKey", 100);
+  const attachmentKeys = [...new Set([...(legacyKey ? [legacyKey] : []), ...(input.attachmentKeys || [])])].slice(0, 4);
+  for (const key of attachmentKeys) await validateAttachmentKey(key, actor);
   await enforceRateLimit(actor, "feedback:create", 20, 60);
   const project = await db.prepare("SELECT code FROM projects WHERE id = ?").bind(projectId).first<{ code: string }>();
   const existing = await db.prepare("SELECT key FROM tickets WHERE project_id = ?").bind(projectId).all<{ key: string }>();
@@ -582,9 +649,71 @@ export async function createTicket(input: Record<string, string>, actor: Actor) 
   await db.prepare(`INSERT INTO tickets
     (id,key,project_id,release_id,type,title,actual,expected,severity,priority,status,reporter,assignee,page_url,browser,viewport,build,attachment_key)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-    .bind(ticketId, key, projectId, releaseId, type, title, actual, expected, severity, "Normal", "Submitted", actor.name, "Unassigned", pageUrl, browser, viewport, build, attachmentKey).run();
+    .bind(ticketId, key, projectId, releaseId, type, title, actual, expected, severity, "Normal", "Submitted", actor.name, "Unassigned", pageUrl, browser, viewport, build, null).run();
+  for (const attachmentKey of attachmentKeys) {
+    await db.prepare("INSERT INTO attachments (id,ticket_id,comment_id,key,uploaded_by) VALUES (?,?,?,?,?)")
+      .bind(id("attach"), ticketId, null, attachmentKey, actor.name).run();
+  }
   await audit(db, "ticket", ticketId, "Feedback submitted", actor, key);
+  await queueTicketNotification(db, actor, ticketId, "created");
   return { ticketId, key };
+}
+
+export async function editTicket(input: Record<string, string>, actor: Actor) {
+  const db = await ensureDatabase();
+  const ticketId = required(input, "ticketId", "Feedback", 100);
+  await assertTicketAccess(db, actor, ticketId);
+  const ticket = await db.prepare("SELECT status, reporter FROM tickets WHERE id = ?").bind(ticketId).first<{ status: string; reporter: string }>();
+  if (!ticket) throw new AccessError("Feedback not found", 404);
+  if (!actor.isStaff) {
+    if (!canSubmitFeedback(actor)) throw new AccessError("Your role has read-only access");
+    if (ticket.reporter !== actor.name) throw new AccessError("You can only edit feedback you reported");
+    if (!["Submitted", "Triaged", "Needs information"].includes(ticket.status)) {
+      throw new AccessError("This feedback is already being worked on and can no longer be edited");
+    }
+  }
+  const type = choice(input, "type", "Feedback type", TICKET_TYPES);
+  const severity = choice(input, "severity", "Severity", SEVERITIES);
+  const title = required(input, "title", "Title", 180);
+  const actual = required(input, "actual", "Observed result", 5000);
+  const expected = required(input, "expected", "Expected result", 5000);
+  const pageUrl = safeUrl(input, "pageUrl", "Page URL");
+  await enforceRateLimit(actor, "feedback:update", 120, 60);
+  await db.prepare("UPDATE tickets SET type = ?, severity = ?, title = ?, actual = ?, expected = ?, page_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    .bind(type, severity, title, actual, expected, pageUrl, ticketId).run();
+  await audit(db, "ticket", ticketId, "Feedback edited", actor, title);
+}
+
+export async function withdrawTicket(input: Record<string, string>, actor: Actor) {
+  const db = await ensureDatabase();
+  const ticketId = required(input, "ticketId", "Feedback", 100);
+  await assertTicketAccess(db, actor, ticketId);
+  const ticket = await db.prepare("SELECT status, reporter FROM tickets WHERE id = ?").bind(ticketId).first<{ status: string; reporter: string }>();
+  if (!ticket) throw new AccessError("Feedback not found", 404);
+  if (ticket.status === "Withdrawn") throw new AccessError("This feedback is already withdrawn", 400);
+  if (!actor.isStaff && ticket.reporter !== actor.name) throw new AccessError("You can only withdraw feedback you reported");
+  if (!actor.isStaff && !canSubmitFeedback(actor)) throw new AccessError("Your role has read-only access");
+  await enforceRateLimit(actor, "feedback:update", 120, 60);
+  await db.prepare("UPDATE tickets SET status = 'Withdrawn', updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(ticketId).run();
+  await audit(db, "ticket", ticketId, "Feedback withdrawn", actor);
+  await queueTicketNotification(db, actor, ticketId, "withdrawn");
+}
+
+export async function markDuplicate(input: Record<string, string>, actor: Actor) {
+  const db = await ensureDatabase();
+  requireRole(actor, ["agency_admin", "project_manager", "developer"], "Only the delivery team can mark duplicates");
+  const ticketId = required(input, "ticketId", "Feedback", 100);
+  const duplicateKey = required(input, "duplicateKey", "Original feedback key", 40).toUpperCase();
+  await assertTicketAccess(db, actor, ticketId);
+  const ticket = await db.prepare("SELECT key FROM tickets WHERE id = ?").bind(ticketId).first<{ key: string }>();
+  if (!ticket) throw new AccessError("Feedback not found", 404);
+  if (ticket.key === duplicateKey) throw new AccessError("Feedback cannot duplicate itself", 400);
+  const original = await db.prepare("SELECT id FROM tickets WHERE key = ?").bind(duplicateKey).first<{ id: string }>();
+  if (!original) throw new AccessError("No feedback exists with that key", 404);
+  await enforceRateLimit(actor, "feedback:update", 120, 60);
+  await db.prepare("UPDATE tickets SET duplicate_of = ?, status = 'Closed', updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+    .bind(duplicateKey, ticketId).run();
+  await audit(db, "ticket", ticketId, "Marked duplicate", actor, `Duplicate of ${duplicateKey}`);
 }
 
 export async function updateTicket(input: Record<string, string>, actor: Actor) {
@@ -611,6 +740,9 @@ export async function updateTicket(input: Record<string, string>, actor: Actor) 
   await enforceRateLimit(actor, "feedback:update", 120, 60);
   await db.prepare(`UPDATE tickets SET ${column} = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).bind(value, ticketId).run();
   await audit(db, "ticket", ticketId, `${field} changed`, actor, value);
+  if (field === "status" && value === "Ready for retest") await queueTicketNotification(db, actor, ticketId, "retest");
+  if (field === "status" && value === "Reopened") await queueTicketNotification(db, actor, ticketId, "reopened");
+  if (field === "status" && value === "Verified") await queueTicketNotification(db, actor, ticketId, "verified");
 }
 
 export async function addComment(input: Record<string, string>, actor: Actor) {
@@ -621,12 +753,20 @@ export async function addComment(input: Record<string, string>, actor: Actor) {
   const ticketId = required(input, "ticketId", "Feedback", 100);
   const body = required(input, "body", "Comment", 5000);
   await assertTicketAccess(db, actor, ticketId);
+  const attachmentKey = optional(input, "attachmentKey", 100);
+  if (attachmentKey) await validateAttachmentKey(attachmentKey, actor);
   await enforceRateLimit(actor, "comment:create", 60, 60);
   const visibility = actor.isStaff && input.visibility === "internal" ? "internal" : "public";
+  const commentId = id("comment");
   await db.prepare("INSERT INTO comments (id,ticket_id,author,body,visibility) VALUES (?,?,?,?,?)")
-    .bind(id("comment"), ticketId, actor.name, body, visibility).run();
+    .bind(commentId, ticketId, actor.name, body, visibility).run();
+  if (attachmentKey) {
+    await db.prepare("INSERT INTO attachments (id,ticket_id,comment_id,key,uploaded_by) VALUES (?,?,?,?,?)")
+      .bind(id("attach"), ticketId, commentId, attachmentKey, actor.name).run();
+  }
   await db.prepare("UPDATE tickets SET updated_at = CURRENT_TIMESTAMP WHERE id = ?").bind(ticketId).run();
   await audit(db, "ticket", ticketId, visibility === "internal" ? "Internal note added" : "Reply sent", actor);
+  if (visibility === "public") await queueTicketNotification(db, actor, ticketId, "comment");
 }
 
 export async function updateChecklist(input: Record<string, string>, actor: Actor) {
@@ -658,7 +798,31 @@ export async function approveRelease(input: Record<string, string>, actor: Actor
   }
   await enforceRateLimit(actor, "release:approve", 10, 60);
   await db.prepare("UPDATE releases SET status = 'Approved', approved_at = CURRENT_TIMESTAMP, approved_by = ? WHERE id = ?").bind(actor.name, releaseId).run();
-  await audit(db, "release", releaseId, "Release approved", actor, optional(input, "exceptions", 1000) || "No exceptions");
+  const exceptions = optional(input, "exceptions", 1000) || "No exceptions";
+  await audit(db, "release", releaseId, "Release approved", actor, exceptions);
+  try {
+    const release = await db.prepare(`SELECT r.name, r.version, p.name AS project_name, p.client_id
+      FROM releases r JOIN projects p ON p.id = r.project_id WHERE r.id = ?`)
+      .bind(releaseId).first<{ name: string; version: string; project_name: string; client_id: string }>();
+    if (release) {
+      const recipients = [
+        ...(await staffEmails(db, actor.email)),
+        ...(await clientSideEmails(db, release.client_id, "", actor.email)),
+      ];
+      await queueNotificationEmail({
+        recipients,
+        subject: `Release approved: ${release.project_name} ${release.version}`,
+        eyebrow: "DeliveryLoop acceptance",
+        heading: "Release approved",
+        copy: `${actor.name} approved “${release.name}” (${release.version}) on ${release.project_name}. Recorded exceptions: ${exceptions}.`,
+        button: "Open release",
+        path: "/",
+        eventId: `approved:${releaseId}:${crypto.randomUUID()}`,
+      });
+    }
+  } catch (error) {
+    console.error(JSON.stringify({ event: "release_notification_failed", message: error instanceof Error ? error.message : String(error) }));
+  }
 }
 
 export async function canAccessAttachment(key: string, actor: Actor) {

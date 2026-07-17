@@ -6,11 +6,14 @@ import {
   createProject,
   createRelease,
   createTicket,
+  editTicket,
   getWorkspace,
+  markDuplicate,
   resendMemberInvite,
   updateChecklist,
   updateMember,
   updateTicket,
+  withdrawTicket,
 } from "../../../db/workspace";
 import { apiError, json, parseActionRequest, requestActor } from "../http";
 
@@ -37,6 +40,9 @@ export async function POST(request: Request) {
       case "createRelease": result = await createRelease(payload, actor); break;
       case "createTicket": result = await createTicket(payload, actor); break;
       case "updateTicket": result = await updateTicket(payload, actor); break;
+      case "editTicket": result = await editTicket(payload, actor); break;
+      case "withdrawTicket": result = await withdrawTicket(payload, actor); break;
+      case "markDuplicate": result = await markDuplicate(payload, actor); break;
       case "addComment": result = await addComment(payload, actor); break;
       case "updateChecklist": result = await updateChecklist(payload, actor); break;
       case "approveRelease": result = await approveRelease(payload, actor); break;

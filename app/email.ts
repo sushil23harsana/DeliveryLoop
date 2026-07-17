@@ -79,6 +79,36 @@ export async function sendPasswordResetEmail(data: { user: { email: string; name
   });
 }
 
+export async function queueNotificationEmail(input: {
+  recipients: string[];
+  subject: string;
+  eyebrow: string;
+  heading: string;
+  copy: string;
+  button: string;
+  path: string;
+  eventId: string;
+}) {
+  const runtime = bindings();
+  if (!runtime.RESEND_API_KEY || !runtime.EMAIL_FROM || !runtime.BETTER_AUTH_URL) return false;
+  const recipients = [...new Set(input.recipients.map((email) => email.trim().toLowerCase()).filter(Boolean))].slice(0, 10);
+  if (!recipients.length) return false;
+  const url = new URL(input.path, runtime.BETTER_AUTH_URL).toString();
+  for (const recipient of recipients) {
+    const message: EmailMessage = {
+      to: recipient,
+      subject: input.subject,
+      html: appEmailHtml(input.eyebrow, input.heading, input.copy, input.button, url),
+      text: `${input.heading}\n\n${input.copy}\n\n${input.button}: ${url}\n`,
+      idempotencyKey: await idempotencyKey(`notify:${input.eventId}:${recipient}`),
+    };
+    waitUntil(sendEmail(message).catch((error) => {
+      console.error(JSON.stringify({ event: "notification_email_failed", message: error instanceof Error ? error.message : String(error) }));
+    }));
+  }
+  return true;
+}
+
 export async function queueInvitationEmail(member: { id: string; email: string; name: string }, invitedBy: string, eventId = member.id) {
   const runtime = bindings();
   if (!runtime.RESEND_API_KEY || !runtime.EMAIL_FROM || !runtime.BETTER_AUTH_URL) return false;

@@ -32,9 +32,14 @@ import {
   Plus,
   RefreshCcw,
   Search,
+  Moon,
+  Pencil,
+  Printer,
   Send,
   Settings2,
   ShieldCheck,
+  Sun,
+  Trash2,
   Type,
   UploadCloud,
   UserPlus,
@@ -51,18 +56,27 @@ type Member = { id: string; email: string; name: string; role: string; client_id
 type Project = { id: string; client_id: string; name: string; code: string; description: string; manager: string; stage: string; staging_url: string; created_at: string };
 type Release = { id: string; project_id: string; name: string; version: string; build: string; status: string; start_date: string; due_date: string; testing_notes: string; approved_at: string | null; approved_by: string | null; created_at: string };
 type ChecklistItem = { id: string; release_id: string; title: string; state: string; created_at: string };
-type Ticket = { id: string; key: string; project_id: string; release_id: string; type: string; title: string; actual: string; expected: string; severity: string; priority: string; status: string; reporter: string; assignee: string; page_url: string; browser: string; viewport: string; build: string; attachment_key: string | null; created_at: string; updated_at: string };
+type Ticket = { id: string; key: string; project_id: string; release_id: string; type: string; title: string; actual: string; expected: string; severity: string; priority: string; status: string; reporter: string; assignee: string; page_url: string; browser: string; viewport: string; build: string; attachment_key: string | null; duplicate_of: string | null; created_at: string; updated_at: string };
 type Comment = { id: string; ticket_id: string; author: string; body: string; visibility: string; created_at: string };
+type Attachment = { id: string; ticket_id: string; comment_id: string | null; key: string; uploaded_by: string; created_at: string };
 type AuditEvent = { id: string; entity_type: string; entity_id: string; action: string; actor: string; details: string; created_at: string };
 type Actor = { id: string; email: string; name: string; role: string; clientId: string | null; isStaff: boolean };
-type Workspace = { clients: Client[]; members: Member[]; projects: Project[]; releases: Release[]; checklist: ChecklistItem[]; tickets: Ticket[]; comments: Comment[]; audit: AuditEvent[] };
+type Workspace = { clients: Client[]; members: Member[]; projects: Project[]; releases: Release[]; checklist: ChecklistItem[]; tickets: Ticket[]; comments: Comment[]; audit: AuditEvent[]; attachments: Attachment[] };
 type View = "overview" | "projects" | "releases" | "feedback" | "clients" | "reports" | "settings";
 type Modal = "feedback" | "project" | "release" | "client" | "member" | null;
 type ActionPayload = Record<string, string | string[]>;
+type ReportPrefill = { pageUrl?: string; viewport?: string };
+type RunAction = (action: string, payload: ActionPayload, success: string, optimistic?: (workspace: Workspace) => Workspace) => Promise<void>;
 
-const closedStatuses = new Set(["Verified", "Closed", "Deferred", "Rejected / out of scope"]);
-const statusOptions = ["Submitted", "Triaged", "In progress", "Needs information", "Approval required", "Ready for retest", "Reopened", "Verified", "Closed", "Deferred", "Rejected / out of scope"];
-const people = ["Unassigned", "Aarav Patel", "Neha Kapoor", "Kabir Shah", "Dev Malhotra", "Isha Verma", "Sana Ali"];
+const closedStatuses = new Set(["Verified", "Closed", "Deferred", "Rejected / out of scope", "Withdrawn"]);
+const statusOptions = ["Submitted", "Triaged", "In progress", "Needs information", "Approval required", "Ready for retest", "Reopened", "Verified", "Closed", "Deferred", "Rejected / out of scope", "Withdrawn"];
+
+const boardColumns: { id: string; label: string; statuses: string[]; dropStatus: string }[] = [
+  { id: "new", label: "New", statuses: ["Submitted", "Triaged"], dropStatus: "Triaged" },
+  { id: "working", label: "In progress", statuses: ["In progress", "Needs information", "Approval required"], dropStatus: "In progress" },
+  { id: "retest", label: "Client retest", statuses: ["Ready for retest", "Reopened"], dropStatus: "Ready for retest" },
+  { id: "done", label: "Done", statuses: ["Verified", "Closed", "Deferred", "Rejected / out of scope", "Withdrawn"], dropStatus: "Closed" },
+];
 
 const staffNavigation = [
   { id: "overview" as View, label: "Overview", icon: LayoutDashboard },
@@ -86,6 +100,21 @@ function formatDate(value: string, includeYear = false) {
   if (!value) return "—";
   const normalized = value.length === 10 ? `${value}T12:00:00` : value;
   return new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", ...(includeYear ? { year: "numeric" } : {}) }).format(new Date(normalized));
+}
+
+function daysSince(value: string) {
+  if (!value) return 0;
+  const normalized = value.includes("T") || value.includes(" ") ? value.replace(" ", "T") + (value.endsWith("Z") ? "" : "Z") : `${value}T12:00:00Z`;
+  const elapsed = Date.now() - new Date(normalized).getTime();
+  return Number.isFinite(elapsed) ? Math.max(0, Math.floor(elapsed / 86400000)) : 0;
+}
+
+function slaChip(ticket: Ticket): { tone: "client" | "team"; label: string } | null {
+  if (closedStatuses.has(ticket.status)) return null;
+  const days = daysSince(ticket.updated_at || ticket.created_at);
+  if (days < 2) return null;
+  if (["Ready for retest", "Needs information"].includes(ticket.status)) return { tone: "client", label: `Waiting on client ${days}d` };
+  return { tone: "team", label: `With delivery team ${days}d` };
 }
 
 function initials(name: string) {
@@ -118,6 +147,7 @@ function scopeWorkspace(data: Workspace, clientId: string | null): Workspace {
     comments: data.comments.filter((comment) => ticketIds.has(comment.ticket_id) && comment.visibility === "public"),
     audit: data.audit.filter((event) => ticketIds.has(event.entity_id) || releaseIds.has(event.entity_id)),
     members: data.members.filter((member) => member.client_id === clientId),
+    attachments: data.attachments.filter((attachment) => ticketIds.has(attachment.ticket_id)),
   };
 }
 
@@ -142,6 +172,16 @@ export function DeliveryLoopApp() {
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [accessError, setAccessError] = useState<{ status: number; message: string } | null>(null);
+  const [boardMode, setBoardMode] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(50);
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    if (typeof window === "undefined") return "light";
+    const stored = window.localStorage.getItem("dl-theme");
+    if (stored === "dark" || stored === "light") return stored;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
+  const [prefill, setPrefill] = useState<ReportPrefill | null>(null);
+  const [printReleaseId, setPrintReleaseId] = useState<string | null>(null);
 
   async function load() {
     const response = await fetch("/api/workspace", { cache: "no-store" });
@@ -155,30 +195,79 @@ export function DeliveryLoopApp() {
     setActor(body.actor);
     setView((current) => body.actor?.isStaff ? current : current === "overview" || current === "clients" || current === "reports" ? "releases" : current);
     setSelectedReleaseId((current) => current || body.workspace?.releases.find((item) => item.status === "Testing" || item.status === "Retest")?.id || body.workspace?.releases[0]?.id || null);
+    return body.workspace;
   }
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      load().catch((error) => setAccessError({ status: 500, message: error instanceof Error ? error.message : "Unable to load workspace" }));
+      load().then((loaded) => {
+        if (!loaded) return;
+        const params = new URLSearchParams(window.location.search);
+        const ticketKey = params.get("ticket");
+        if (ticketKey) {
+          const ticket = loaded.tickets.find((item) => item.key.toLowerCase() === ticketKey.toLowerCase());
+          if (ticket) {
+            setView("feedback");
+            setSelectedTicketId(ticket.id);
+          }
+        }
+        if (params.get("report") === "1") {
+          setPrefill({ pageUrl: params.get("url") || undefined, viewport: params.get("vw") || undefined });
+          setModal("feedback");
+        }
+        if (ticketKey || params.get("report")) window.history.replaceState(null, "", window.location.pathname);
+      }).catch((error) => setAccessError({ status: 500, message: error instanceof Error ? error.message : "Unable to load workspace" }));
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") { setSelectedTicketId(null); setModal(null); return; }
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) return;
+      if (event.key === "/") {
+        event.preventDefault();
+        setView("feedback");
+        window.setTimeout(() => (document.querySelector(".search-box input") as HTMLInputElement | null)?.focus(), 50);
+      }
+      if (event.key.toLowerCase() === "n" && actor && (actor.isStaff || ["client_admin", "client_tester"].includes(actor.role))) {
+        setModal("feedback");
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [actor]);
+
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    window.localStorage.setItem("dl-theme", next);
+  }
 
   function notify(message: string) {
     setToast(message);
     window.setTimeout(() => setToast(null), 3400);
   }
 
-  async function runAction(action: string, payload: ActionPayload, success: string) {
+  async function runAction(action: string, payload: ActionPayload, success: string, optimistic?: (workspace: Workspace) => Workspace) {
     setBusy(true);
+    if (optimistic) setWorkspace((current) => current ? optimistic(current) : current);
     try {
       const response = await fetch("/api/workspace", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, payload }) });
       const body = await response.json() as { error?: string };
       if (!response.ok) throw new Error(body.error || "Action failed");
       await load();
       setModal(null);
+      setPrefill(null);
       notify(success);
     } catch (error) {
+      if (optimistic) await load().catch(() => undefined);
       notify(error instanceof Error ? error.message : "Action failed");
     } finally {
       setBusy(false);
@@ -207,6 +296,8 @@ export function DeliveryLoopApp() {
   const canManageClients = actor.role === "agency_admin";
   const canManageDelivery = actor.role === "agency_admin" || actor.role === "project_manager";
   const navigation = isClientView ? [...clientNavigation, ...(canManageClientMembers ? [clientAdminNavigation] : [])] : staffNavigation;
+  const assigneeOptions = ["Unassigned", ...new Set(fullWorkspace.members.filter((member) => !member.client_id && member.active === "1").map((member) => member.name))];
+  const printRelease = printReleaseId ? data.releases.find((release) => release.id === printReleaseId) : null;
 
   const visibleTickets = data.tickets.filter((ticket) => {
     const project = data.projects.find((item) => item.id === ticket.project_id);
@@ -271,6 +362,10 @@ export function DeliveryLoopApp() {
               </select>
             </label>
           ) : null}
+          <button className="theme-toggle" onClick={toggleTheme}>
+            {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
+            <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+          </button>
           <div className="account-row">
             <span className="avatar">{initials(actor.name)}</span>
             <div><strong>{actor.name}</strong><small>{roleLabel(actor.role)}</small></div>
@@ -298,19 +393,22 @@ export function DeliveryLoopApp() {
         {view === "overview" && !isClientView ? (
           <Overview data={data} openTickets={openTickets} blockers={blockers} retest={retest} testingReleases={testingReleases} setView={setView} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} setSelectedTicketId={setSelectedTicketId} />
         ) : null}
-        {view === "projects" ? <Projects data={data} isClientView={isClientView} clientById={clientById} setView={setView} setSelectedReleaseId={setSelectedReleaseId} /> : null}
-        {view === "releases" ? <Releases data={data} actor={actor} isClientView={isClientView} selectedRelease={selectedRelease} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} runAction={runAction} busy={busy} /> : null}
-        {view === "feedback" ? <Feedback data={data} tickets={visibleTickets} query={query} setQuery={setQuery} statusFilter={statusFilter} setStatusFilter={setStatusFilter} setSelectedTicketId={setSelectedTicketId} /> : null}
+        {view === "projects" ? <Projects data={data} isClientView={isClientView} clientById={clientById} setView={setView} setSelectedReleaseId={setSelectedReleaseId} notify={notify} /> : null}
+        {view === "releases" ? <Releases data={data} actor={actor} isClientView={isClientView} selectedRelease={selectedRelease} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} runAction={runAction} busy={busy} setPrintReleaseId={setPrintReleaseId} /> : null}
+        {view === "feedback" ? <Feedback data={data} tickets={visibleTickets} query={query} setQuery={setQuery} statusFilter={statusFilter} setStatusFilter={setStatusFilter} setSelectedTicketId={setSelectedTicketId} boardMode={boardMode} setBoardMode={setBoardMode} visibleCount={visibleCount} setVisibleCount={setVisibleCount} isStaff={actor.isStaff && !previewClientId} runAction={runAction} /> : null}
         {view === "clients" && (!isClientView || canManageClientMembers) ? <Clients data={data} actor={actor} openMemberModal={openMemberModal} runAction={runAction} busy={busy} notify={notify} /> : null}
         {view === "reports" && !isClientView ? <Reports data={data} /> : null}
         {view === "settings" && !isClientView ? <Settings data={data} actor={actor} openMemberModal={openMemberModal} runAction={runAction} busy={busy} notify={notify} /> : null}
       </main>
 
       {selectedTicket ? (
-        <FeedbackDrawer ticket={selectedTicket} project={projectById(selectedTicket.project_id)} release={releaseById(selectedTicket.release_id)} comments={data.comments.filter((comment) => comment.ticket_id === selectedTicket.id)} isClientView={isClientView} canRespond={canReport} close={() => setSelectedTicketId(null)} runAction={runAction} busy={busy} />
+        <FeedbackDrawer ticket={selectedTicket} actor={actor} project={projectById(selectedTicket.project_id)} release={releaseById(selectedTicket.release_id)} comments={data.comments.filter((comment) => comment.ticket_id === selectedTicket.id)} attachments={data.attachments.filter((attachment) => attachment.ticket_id === selectedTicket.id)} audit={data.audit.filter((event) => event.entity_id === selectedTicket.id)} siblingTickets={data.tickets.filter((item) => item.project_id === selectedTicket.project_id && item.id !== selectedTicket.id)} openTicketByKey={(key) => { const target = data.tickets.find((item) => item.key === key); if (target) setSelectedTicketId(target.id); }} assigneeOptions={assigneeOptions} isClientView={isClientView} canRespond={canReport} close={() => setSelectedTicketId(null)} runAction={runAction} busy={busy} notify={notify} />
       ) : null}
       {modal ? (
-        <ActionModal modal={modal} data={isClientView ? data : workspace} isClientView={isClientView} selectedRelease={selectedRelease} memberClientId={memberClientId} close={() => setModal(null)} runAction={runAction} busy={busy} notify={notify} />
+        <ActionModal modal={modal} data={isClientView ? data : workspace} isClientView={isClientView} selectedRelease={selectedRelease} memberClientId={memberClientId} prefill={prefill} close={() => { setModal(null); setPrefill(null); }} runAction={runAction} busy={busy} notify={notify} />
+      ) : null}
+      {printRelease ? (
+        <AcceptanceReport release={printRelease} project={projectById(printRelease.project_id)} client={clientById(projectById(printRelease.project_id)?.client_id || "")} checklist={data.checklist.filter((item) => item.release_id === printRelease.id)} tickets={data.tickets.filter((ticket) => ticket.release_id === printRelease.id)} audit={data.audit.filter((event) => event.entity_id === printRelease.id)} close={() => setPrintReleaseId(null)} />
       ) : null}
       {toast ? <div className="toast" role="status"><CheckCircle2 size={18} />{toast}</div> : null}
     </div>
@@ -381,14 +479,25 @@ function CircleDotIcon() {
   return <span className="activity-dot" />;
 }
 
-function Projects({ data, isClientView, clientById, setView, setSelectedReleaseId }: { data: Workspace; isClientView: boolean; clientById: (id: string) => Client | undefined; setView: (view: View) => void; setSelectedReleaseId: (id: string) => void }) {
+function Projects({ data, isClientView, clientById, setView, setSelectedReleaseId, notify }: { data: Workspace; isClientView: boolean; clientById: (id: string) => Client | undefined; setView: (view: View) => void; setSelectedReleaseId: (id: string) => void; notify: (message: string) => void }) {
+  async function copyBookmarklet(projectName: string) {
+    const origin = window.location.origin;
+    const bookmarklet = `javascript:(function(){var u=encodeURIComponent(location.href);var v=encodeURIComponent(innerWidth+' x '+innerHeight);window.open('${origin}/?report=1&url='+u+'&vw='+v,'_blank');})();`;
+    try {
+      await navigator.clipboard.writeText(bookmarklet);
+      notify(`Capture bookmarklet copied for ${projectName}. Save it as a browser bookmark and click it on any staging page.`);
+    } catch {
+      notify("Could not copy the bookmarklet to the clipboard");
+    }
+  }
   return <div className="page-content"><div className="project-list">{data.projects.map((project) => {
     const client = clientById(project.client_id); const releases = data.releases.filter((release) => release.project_id === project.id); const tickets = data.tickets.filter((ticket) => ticket.project_id === project.id); const current = releases.find((release) => release.status !== "Approved") || releases[0];
-    return <article className="project-row-card" key={project.id}><div className="project-identity"><span style={{ background: client?.accent }}>{project.code}</span><div><p>{client?.name}</p><h2>{project.name}</h2><small>{project.description}</small></div></div><dl><div><dt>Lead</dt><dd>{project.manager}</dd></div><div><dt>Stage</dt><dd><StatusBadge value={project.stage} /></dd></div><div><dt>Open feedback</dt><dd>{tickets.filter((ticket) => !closedStatuses.has(ticket.status)).length}</dd></div><div><dt>Current release</dt><dd>{current?.version || "—"}</dd></div></dl><div className="row-actions">{project.staging_url ? <a href={project.staging_url} target="_blank" rel="noreferrer" className="quiet-button">Staging <ExternalLink size={14} /></a> : null}{current ? <button className="secondary-button" onClick={() => { setSelectedReleaseId(current.id); setView("releases"); }}>View release <ChevronRight size={14} /></button> : null}</div>{isClientView ? <span className="client-access-note"><ShieldCheck size={14} /> Your organisation only</span> : null}</article>;
+    return <article className="project-row-card" key={project.id}><div className="project-identity"><span style={{ background: client?.accent }}>{project.code}</span><div><p>{client?.name}</p><h2>{project.name}</h2><small>{project.description}</small></div></div><dl><div><dt>Lead</dt><dd>{project.manager}</dd></div><div><dt>Stage</dt><dd><StatusBadge value={project.stage} /></dd></div><div><dt>Open feedback</dt><dd>{tickets.filter((ticket) => !closedStatuses.has(ticket.status)).length}</dd></div><div><dt>Current release</dt><dd>{current?.version || "—"}</dd></div></dl><div className="row-actions"><button className="quiet-button" title="Copy a bookmarklet that opens a prefilled feedback form from any staging page" onClick={() => copyBookmarklet(project.name)}><Copy size={14} /> Capture tool</button>{project.staging_url ? <a href={project.staging_url} target="_blank" rel="noreferrer" className="quiet-button">Staging <ExternalLink size={14} /></a> : null}{current ? <button className="secondary-button" onClick={() => { setSelectedReleaseId(current.id); setView("releases"); }}>View release <ChevronRight size={14} /></button> : null}</div>{isClientView ? <span className="client-access-note"><ShieldCheck size={14} /> Your organisation only</span> : null}</article>;
   })}</div></div>;
 }
 
-function Releases({ data, actor, isClientView, selectedRelease, setSelectedReleaseId, projectById, clientById, runAction, busy }: { data: Workspace; actor: Actor; isClientView: boolean; selectedRelease?: Release; setSelectedReleaseId: (id: string) => void; projectById: (id: string) => Project | undefined; clientById: (id: string) => Client | undefined; runAction: (action: string, payload: ActionPayload, success: string) => Promise<void>; busy: boolean }) {
+function Releases({ data, actor, isClientView, selectedRelease, setSelectedReleaseId, projectById, clientById, runAction, busy, setPrintReleaseId }: { data: Workspace; actor: Actor; isClientView: boolean; selectedRelease?: Release; setSelectedReleaseId: (id: string) => void; projectById: (id: string) => Project | undefined; clientById: (id: string) => Client | undefined; runAction: RunAction; busy: boolean; setPrintReleaseId: (id: string | null) => void }) {
+  const [exceptions, setExceptions] = useState("");
   if (!selectedRelease) return <div className="page-content"><EmptyState icon={PackageCheck} title="No releases yet" body="Create the first release to begin client UAT." /></div>;
   const project = projectById(selectedRelease.project_id); const client = clientById(project?.client_id || "");
   const checks = data.checklist.filter((item) => item.release_id === selectedRelease.id);
@@ -399,16 +508,63 @@ function Releases({ data, actor, isClientView, selectedRelease, setSelectedRelea
   const canApprove = blockers.length === 0 && incomplete.length === 0 && selectedRelease.status !== "Approved";
   const canSign = ["agency_admin", "project_manager", "client_admin"].includes(actor.role);
   const canTest = actor.isStaff || ["client_admin", "client_tester"].includes(actor.role);
+  const approvalEvent = data.audit.find((event) => event.entity_id === selectedRelease.id && event.action === "Release approved");
   const cycle = (state: string) => state === "Not tested" ? "Passed" : state === "Passed" ? "Failed" : "Not tested";
+  function toggleCheck(item: ChecklistItem) {
+    const next = cycle(item.state);
+    void runAction("updateChecklist", { itemId: item.id, state: next }, `Updated “${item.title}”`, (workspace) => ({
+      ...workspace,
+      checklist: workspace.checklist.map((entry) => entry.id === item.id ? { ...entry, state: next } : entry),
+    }));
+  }
   return <div className="page-content release-page">
     <aside className="release-index"><p>Release history</p>{data.releases.map((release) => <button key={release.id} className={release.id === selectedRelease.id ? "active" : ""} onClick={() => setSelectedReleaseId(release.id)}><span className={`release-dot ${release.status.toLowerCase()}`} /><span><b>{release.version}</b><small>{release.name}</small></span><time>{formatDate(release.due_date)}</time></button>)}</aside>
     <section className="release-content">
-      <article className="release-summary surface"><div className="release-summary-top"><div className="release-title"><span style={{ background: client?.accent }}>{initials(client?.name || "CL")}</span><div><p>{client?.name} / {project?.name}</p><h2>{selectedRelease.name}</h2><small>{selectedRelease.version} · {selectedRelease.build}</small></div></div><StatusBadge value={selectedRelease.status} /></div><p className="release-brief">{selectedRelease.testing_notes}</p><dl><div><CalendarDays size={16} /><span><dt>Testing window</dt><dd>{formatDate(selectedRelease.start_date)} – {formatDate(selectedRelease.due_date, true)}</dd></span></div><div><Inbox size={16} /><span><dt>Feedback</dt><dd>{open.length} open / {releaseTickets.length} total</dd></span></div><div><AlertTriangle size={16} /><span><dt>Blocking</dt><dd className={blockers.length ? "danger-text" : "success-text"}>{blockers.length || "Clear"}</dd></span></div></dl></article>
+      <article className="release-summary surface"><div className="release-summary-top"><div className="release-title"><span style={{ background: client?.accent }}>{initials(client?.name || "CL")}</span><div><p>{client?.name} / {project?.name}</p><h2>{selectedRelease.name}</h2><small>{selectedRelease.version} · {selectedRelease.build}</small></div></div><span className="release-summary-actions"><button className="quiet-button" onClick={() => setPrintReleaseId(selectedRelease.id)}><Printer size={15} /> Acceptance report</button><StatusBadge value={selectedRelease.status} /></span></div><p className="release-brief">{selectedRelease.testing_notes}</p><dl><div><CalendarDays size={16} /><span><dt>Testing window</dt><dd>{formatDate(selectedRelease.start_date)} – {formatDate(selectedRelease.due_date, true)}</dd></span></div><div><Inbox size={16} /><span><dt>Feedback</dt><dd>{open.length} open / {releaseTickets.length} total</dd></span></div><div><AlertTriangle size={16} /><span><dt>Blocking</dt><dd className={blockers.length ? "danger-text" : "success-text"}>{blockers.length || "Clear"}</dd></span></div></dl></article>
       <div className="release-workspace">
-        <article className="surface checklist-panel"><header className="section-header"><div><p>Acceptance scope</p><h2>UAT checklist</h2></div><span className="fraction">{checks.filter((item) => item.state === "Passed").length} / {checks.length}</span></header><div className="checklist-list">{checks.map((item) => <button key={item.id} disabled={busy || selectedRelease.status === "Approved" || !canTest} onClick={() => runAction("updateChecklist", { itemId: item.id, state: cycle(item.state) }, `Updated “${item.title}”`)}><span className={`check-box ${item.state.toLowerCase().replace(" ", "-")}`}>{item.state === "Passed" ? <Check size={14} /> : item.state === "Failed" ? <X size={14} /> : null}</span><span><b>{item.title}</b><small>{item.state}</small></span></button>)}</div></article>
-        <article className="surface approval-panel"><header className="section-header"><div><p>Delivery gate</p><h2>{selectedRelease.status === "Approved" ? "Release accepted" : "Client sign-off"}</h2></div><ShieldCheck size={18} /></header>{selectedRelease.status === "Approved" ? <div className="approved-state"><CheckCircle2 size={28} /><h3>Accepted by {selectedRelease.approved_by}</h3><p>{formatDate(selectedRelease.approved_at || "", true)}</p><small>The immutable audit event has been recorded.</small></div> : <><div className="gate-list"><GateRow passed={!blockers.length} title="No open blockers" detail={blockers.length ? `${blockers.length} high-impact items remain` : "Requirement met"} /><GateRow passed={!incomplete.length} title="Checklist complete" detail={incomplete.length ? `${incomplete.length} checks are not passed` : "Requirement met"} /><GateRow passed={canSign} title="Authorised approver" detail={canSign ? roleLabel(actor.role) : "Client admin approval required"} /></div><button className="primary-button full" disabled={!canApprove || !canSign || busy} onClick={() => runAction("approveRelease", { releaseId: selectedRelease.id }, "Release approved and recorded")}>{canApprove && canSign ? "Approve release" : "Complete the gates above"}</button><p className="approval-note">Approval captures the release build, approver and timestamp.</p></>}</article>
+        <article className="surface checklist-panel"><header className="section-header"><div><p>Acceptance scope</p><h2>UAT checklist</h2></div><span className="fraction">{checks.filter((item) => item.state === "Passed").length} / {checks.length}</span></header><div className="checklist-list">{checks.map((item) => <button key={item.id} disabled={busy || selectedRelease.status === "Approved" || !canTest} onClick={() => toggleCheck(item)}><span className={`check-box ${item.state.toLowerCase().replace(" ", "-")}`}>{item.state === "Passed" ? <Check size={14} /> : item.state === "Failed" ? <X size={14} /> : null}</span><span><b>{item.title}</b><small>{item.state}</small></span></button>)}</div></article>
+        <article className="surface approval-panel"><header className="section-header"><div><p>Delivery gate</p><h2>{selectedRelease.status === "Approved" ? "Release accepted" : "Client sign-off"}</h2></div><ShieldCheck size={18} /></header>{selectedRelease.status === "Approved" ? <div className="approved-state"><CheckCircle2 size={28} /><h3>Accepted by {selectedRelease.approved_by}</h3><p>{formatDate(selectedRelease.approved_at || "", true)}</p>{approvalEvent?.details && approvalEvent.details !== "No exceptions" ? <span className="approved-exceptions"><b>Recorded exceptions</b>{approvalEvent.details}</span> : null}<small>The immutable audit event has been recorded.</small></div> : <><div className="gate-list"><GateRow passed={!blockers.length} title="No open blockers" detail={blockers.length ? `${blockers.length} high-impact items remain` : "Requirement met"} /><GateRow passed={!incomplete.length} title="Checklist complete" detail={incomplete.length ? `${incomplete.length} checks are not passed` : "Requirement met"} /><GateRow passed={canSign} title="Authorised approver" detail={canSign ? roleLabel(actor.role) : "Client admin approval required"} /></div>{canApprove && canSign ? <label className="exceptions-field">Exceptions to record (optional)<textarea value={exceptions} maxLength={1000} onChange={(event) => setExceptions(event.target.value)} placeholder="Agreed items that ship despite being open, e.g. deferred content fixes" /></label> : null}<button className="primary-button full" disabled={!canApprove || !canSign || busy} onClick={() => runAction("approveRelease", { releaseId: selectedRelease.id, exceptions: exceptions.trim() }, "Release approved and recorded")}>{canApprove && canSign ? "Approve release" : "Complete the gates above"}</button><p className="approval-note">Approval captures the release build, approver, timestamp and any recorded exceptions.</p></>}</article>
       </div>
       {isClientView ? <div className="client-help"><ShieldCheck size={17} /><span><b>You are reviewing your organisation’s release.</b><small>Internal delivery notes and other client workspaces are hidden.</small></span></div> : null}
+    </section>
+  </div>;
+}
+
+function AcceptanceReport({ release, project, client, checklist, tickets, audit, close }: { release: Release; project?: Project; client?: Client; checklist: ChecklistItem[]; tickets: Ticket[]; audit: AuditEvent[]; close: () => void }) {
+  const open = tickets.filter((ticket) => !closedStatuses.has(ticket.status));
+  const resolved = tickets.filter((ticket) => closedStatuses.has(ticket.status));
+  const approvalEvent = audit.find((event) => event.action === "Release approved");
+  return <div className="print-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
+    <section className="print-sheet" role="dialog" aria-modal="true" aria-label="Acceptance report">
+      <header className="print-toolbar no-print">
+        <p>Preview of the acceptance evidence document</p>
+        <span><button className="secondary-button" onClick={close}><X size={15} /> Close</button><button className="primary-button" onClick={() => window.print()}><Printer size={15} /> Print or save PDF</button></span>
+      </header>
+      <div className="print-body">
+        <header className="print-head">
+          <div><p>UAT acceptance report</p><h1>{project?.name}</h1><small>{client?.name} · Prepared {formatDate(new Date().toISOString(), true)}</small></div>
+          <span className="print-brand">DeliveryLoop</span>
+        </header>
+        <dl className="print-facts">
+          <div><dt>Release</dt><dd>{release.name}</dd></div>
+          <div><dt>Version / build</dt><dd>{release.version} · {release.build}</dd></div>
+          <div><dt>Testing window</dt><dd>{formatDate(release.start_date, true)} – {formatDate(release.due_date, true)}</dd></div>
+          <div><dt>Status</dt><dd>{release.status}{release.approved_by ? ` by ${release.approved_by} on ${formatDate(release.approved_at || "", true)}` : ""}</dd></div>
+          {approvalEvent ? <div className="span-2"><dt>Recorded exceptions</dt><dd>{approvalEvent.details || "No exceptions"}</dd></div> : null}
+        </dl>
+        <h2>Acceptance checklist</h2>
+        <table><thead><tr><th>Acceptance flow</th><th>Result</th></tr></thead><tbody>
+          {checklist.map((item) => <tr key={item.id}><td>{item.title}</td><td className={item.state === "Passed" ? "pass" : item.state === "Failed" ? "fail" : ""}>{item.state}</td></tr>)}
+          {!checklist.length ? <tr><td colSpan={2}>No checklist items were defined.</td></tr> : null}
+        </tbody></table>
+        <h2>Feedback summary</h2>
+        <table><thead><tr><th>Key</th><th>Title</th><th>Type</th><th>Severity</th><th>Status</th></tr></thead><tbody>
+          {tickets.map((ticket) => <tr key={ticket.id}><td>{ticket.key}</td><td>{ticket.title}</td><td>{ticket.type}</td><td>{ticket.severity}</td><td>{ticket.status}</td></tr>)}
+          {!tickets.length ? <tr><td colSpan={5}>No feedback was reported for this release.</td></tr> : null}
+        </tbody></table>
+        <p className="print-summary">{resolved.length} of {tickets.length} feedback items resolved · {open.length} open at time of report.</p>
+        <footer className="print-footer">Generated by DeliveryLoop. Approval events are recorded with the approver identity and timestamp in the immutable audit log.</footer>
+      </div>
     </section>
   </div>;
 }
@@ -417,14 +573,80 @@ function GateRow({ passed, title, detail }: { passed: boolean; title: string; de
   return <div><span className={passed ? "pass" : "block"}>{passed ? <Check size={13} /> : <AlertCircle size={13} />}</span><p><b>{title}</b><small>{detail}</small></p></div>;
 }
 
-function Feedback({ data, tickets, query, setQuery, statusFilter, setStatusFilter, setSelectedTicketId }: { data: Workspace; tickets: Ticket[]; query: string; setQuery: (value: string) => void; statusFilter: string; setStatusFilter: (value: string) => void; setSelectedTicketId: (id: string) => void }) {
-  return <div className="page-content feedback-page"><div className="filter-row"><label className="search-box"><Search size={16} /><input aria-label="Search feedback" placeholder="Search feedback, project or reporter" value={query} onChange={(event) => setQuery(event.target.value)} /></label><label className="filter-select"><span>Status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>All statuses</option>{statusOptions.map((status) => <option key={status}>{status}</option>)}</select></label><span className="result-count">{tickets.length} results</span></div><article className="surface feedback-surface"><FeedbackTable tickets={tickets} projects={data.projects} onOpen={setSelectedTicketId} /></article></div>;
+function Feedback({ data, tickets, query, setQuery, statusFilter, setStatusFilter, setSelectedTicketId, boardMode, setBoardMode, visibleCount, setVisibleCount, isStaff, runAction }: { data: Workspace; tickets: Ticket[]; query: string; setQuery: (value: string) => void; statusFilter: string; setStatusFilter: (value: string) => void; setSelectedTicketId: (id: string) => void; boardMode: boolean; setBoardMode: (value: boolean) => void; visibleCount: number; setVisibleCount: (value: number) => void; isStaff: boolean; runAction: RunAction }) {
+  const paged = tickets.slice(0, visibleCount);
+  return <div className="page-content feedback-page">
+    <div className="filter-row">
+      <label className="search-box"><Search size={16} /><input aria-label="Search feedback" placeholder="Search feedback, project or reporter  ( / )" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+      <label className="filter-select"><span>Status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>All statuses</option>{statusOptions.map((status) => <option key={status}>{status}</option>)}</select></label>
+      <div className="view-toggle" role="group" aria-label="Layout">
+        <button className={boardMode ? "" : "active"} onClick={() => setBoardMode(false)}>List</button>
+        <button className={boardMode ? "active" : ""} onClick={() => setBoardMode(true)}>Board</button>
+      </div>
+      <span className="result-count">{tickets.length} results</span>
+    </div>
+    {boardMode ? (
+      <FeedbackBoard tickets={tickets} onOpen={setSelectedTicketId} isStaff={isStaff} runAction={runAction} />
+    ) : (
+      <article className="surface feedback-surface">
+        <FeedbackTable tickets={paged} projects={data.projects} onOpen={setSelectedTicketId} />
+        {tickets.length > visibleCount ? <div className="load-more"><button className="secondary-button" onClick={() => setVisibleCount(visibleCount + 50)}>Show {Math.min(50, tickets.length - visibleCount)} more of {tickets.length - visibleCount}</button></div> : null}
+      </article>
+    )}
+  </div>;
+}
+
+function FeedbackBoard({ tickets, onOpen, isStaff, runAction }: { tickets: Ticket[]; onOpen: (id: string) => void; isStaff: boolean; runAction: RunAction }) {
+  const [dragOver, setDragOver] = useState<string | null>(null);
+  function handleDrop(columnId: string, event: React.DragEvent) {
+    event.preventDefault();
+    setDragOver(null);
+    if (!isStaff) return;
+    const ticketId = event.dataTransfer.getData("text/deliveryloop-ticket");
+    const ticket = tickets.find((item) => item.id === ticketId);
+    const column = boardColumns.find((item) => item.id === columnId);
+    if (!ticket || !column || column.statuses.includes(ticket.status)) return;
+    void runAction("updateTicket", { ticketId: ticket.id, field: "status", value: column.dropStatus }, `${ticket.key} moved to ${column.dropStatus}`, (workspace) => ({
+      ...workspace,
+      tickets: workspace.tickets.map((entry) => entry.id === ticket.id ? { ...entry, status: column.dropStatus } : entry),
+    }));
+  }
+  return <div className="feedback-board">
+    {boardColumns.map((column) => {
+      const columnTickets = tickets.filter((ticket) => column.statuses.includes(ticket.status));
+      return <section key={column.id} className={`board-column ${dragOver === column.id ? "drag-over" : ""}`}
+        onDragOver={(event) => { if (isStaff) { event.preventDefault(); setDragOver(column.id); } }}
+        onDragLeave={() => setDragOver((current) => current === column.id ? null : current)}
+        onDrop={(event) => handleDrop(column.id, event)}>
+        <header><span>{column.label}</span><em>{columnTickets.length}</em></header>
+        <div className="board-cards">
+          {columnTickets.map((ticket) => {
+            const chip = slaChip(ticket);
+            const Icon = feedbackIcons[ticket.type] || MessageCircleQuestion;
+            return <button key={ticket.id} className="board-card" draggable={isStaff}
+              onDragStart={(event) => event.dataTransfer.setData("text/deliveryloop-ticket", ticket.id)}
+              onClick={() => onOpen(ticket.id)}>
+              <span className="board-card-top"><i className={`feedback-type ${ticket.type.toLowerCase().replace(" ", "-")}`}><Icon size={14} /></i><small>{ticket.key}</small><em className={`priority-label ${ticket.priority.toLowerCase()}`}>{ticket.priority}</em></span>
+              <b>{ticket.title}</b>
+              <span className="board-card-meta"><StatusBadge value={ticket.status} />{chip ? <SlaChip chip={chip} /> : null}</span>
+            </button>;
+          })}
+          {!columnTickets.length ? <div className="board-empty">Nothing here</div> : null}
+        </div>
+      </section>;
+    })}
+  </div>;
+}
+
+function SlaChip({ chip }: { chip: { tone: "client" | "team"; label: string } }) {
+  return <span className={`sla-chip ${chip.tone}`}><Clock3 size={11} />{chip.label}</span>;
 }
 
 function FeedbackTable({ tickets, projects, onOpen, compact = false }: { tickets: Ticket[]; projects: Project[]; onOpen: (id: string) => void; compact?: boolean }) {
   return <div className={`feedback-table ${compact ? "compact" : ""}`}><div className="feedback-head"><span>Feedback</span><span>Project</span><span>Status</span><span>Priority</span><span>Owner</span></div>{tickets.length ? tickets.map((ticket) => {
     const project = projects.find((item) => item.id === ticket.project_id); const Icon = feedbackIcons[ticket.type] || MessageCircleQuestion;
-    return <button className="feedback-row" key={ticket.id} onClick={() => onOpen(ticket.id)}><span className="feedback-title"><i className={`feedback-type ${ticket.type.toLowerCase().replace(" ", "-")}`}><Icon size={15} /></i><span><b>{ticket.title}</b><small>{ticket.key} · {ticket.reporter}</small></span></span><span className="project-reference"><b>{project?.code}</b><small>{project?.name}</small></span><StatusBadge value={ticket.status} /><span className={`priority-label ${ticket.priority.toLowerCase()}`}>{ticket.priority}</span><span className="owner-cell"><i>{initials(ticket.assignee)}</i>{ticket.assignee}</span></button>;
+    const chip = compact ? null : slaChip(ticket);
+    return <button className="feedback-row" key={ticket.id} onClick={() => onOpen(ticket.id)}><span className="feedback-title"><i className={`feedback-type ${ticket.type.toLowerCase().replace(" ", "-")}`}><Icon size={15} /></i><span><b>{ticket.title}</b><small>{ticket.key} · {ticket.reporter}</small></span></span><span className="project-reference"><b>{project?.code}</b><small>{project?.name}</small></span><span className="status-cell"><StatusBadge value={ticket.status} />{chip ? <SlaChip chip={chip} /> : null}</span><span className={`priority-label ${ticket.priority.toLowerCase()}`}>{ticket.priority}</span><span className="owner-cell"><i>{initials(ticket.assignee)}</i>{ticket.assignee}</span></button>;
   }) : <EmptyState icon={Inbox} title="No feedback in this view" body="Change the filters or report a new issue." />}</div>;
 }
 
@@ -523,13 +745,149 @@ function Reports({ data }: { data: Workspace }) {
   return <div className="page-content report-page"><div className="report-actions"><p>Portfolio-wide UAT performance and delivery evidence.</p><button className="secondary-button" onClick={exportCsv}><Download size={15} /> Export CSV</button></div><div className="report-grid"><article className="surface completion-panel"><header className="section-header"><div><p>Portfolio health</p><h2>UAT completion</h2></div><span>{completion}%</span></header><div className="completion-body"><div className="completion-meter"><i style={{ width: `${completion}%` }} /></div><dl><div><dt>Feedback captured</dt><dd>{total}</dd></div><div><dt>Verified or closed</dt><dd>{complete}</dd></div><div><dt>Open blockers</dt><dd>{data.tickets.filter((ticket) => !closedStatuses.has(ticket.status) && ["Critical", "High"].includes(ticket.severity)).length}</dd></div></dl></div></article><article className="surface type-panel"><header className="section-header"><div><p>Scope clarity</p><h2>Feedback by type</h2></div></header><div className="type-bars">{types.map((type) => { const count = data.tickets.filter((ticket) => ticket.type === type).length; return <div key={type}><span><b>{type}</b><em>{count}</em></span><i><u style={{ width: `${total ? (count / total) * 100 : 0}%` }} /></i></div>; })}</div></article></div><article className="surface audit-panel"><header className="section-header"><div><p>Evidence</p><h2>Acceptance trail</h2></div><FileText size={17} /></header><div className="audit-table"><div className="audit-head"><span>Event</span><span>Actor</span><span>Details</span><span>Date</span></div>{data.audit.map((event) => <div key={event.id}><b>{event.action}</b><span>{event.actor}</span><span>{event.details || "—"}</span><time>{formatDate(event.created_at, true)}</time></div>)}</div></article></div>;
 }
 
-function FeedbackDrawer({ ticket, project, release, comments, isClientView, canRespond, close, runAction, busy }: { ticket: Ticket; project?: Project; release?: Release; comments: Comment[]; isClientView: boolean; canRespond: boolean; close: () => void; runAction: (action: string, payload: ActionPayload, success: string) => Promise<void>; busy: boolean }) {
+function FeedbackDrawer({ ticket, actor, project, release, comments, attachments, audit, siblingTickets, openTicketByKey, assigneeOptions, isClientView, canRespond, close, runAction, busy, notify }: { ticket: Ticket; actor: Actor; project?: Project; release?: Release; comments: Comment[]; attachments: Attachment[]; audit: AuditEvent[]; siblingTickets: Ticket[]; openTicketByKey: (key: string) => void; assigneeOptions: string[]; isClientView: boolean; canRespond: boolean; close: () => void; runAction: RunAction; busy: boolean; notify: (message: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [duplicatePicker, setDuplicatePicker] = useState(false);
   const visibleComments = comments.filter((comment) => !isClientView || comment.visibility === "public");
-  async function submitReply(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = new FormData(event.currentTarget); const body = field(form, "body"); if (!body) return; await runAction("addComment", { ticketId: ticket.id, body, visibility: isClientView ? "public" : field(form, "visibility") || "public" }, "Update added"); }
-  return <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><aside className="feedback-drawer"><header><div><p>{ticket.key} · {project?.name}</p><h2>{ticket.title}</h2></div><button onClick={close} aria-label="Close feedback"><X size={19} /></button></header><div className="drawer-scroll"><div className="badge-row"><TypeBadge value={ticket.type} /><SeverityBadge value={ticket.severity} /></div><section className="problem-card"><div><span>Observed</span><p>{ticket.actual}</p></div><div><span>Expected</span><p>{ticket.expected}</p></div></section>{ticket.attachment_key ? <a className="attachment-link" href={`/api/uploads/${encodeURIComponent(ticket.attachment_key)}`} target="_blank" rel="noreferrer"><Paperclip size={15} /> View screenshot <ExternalLink size={13} /></a> : null}<section className="property-grid"><label>Status<select disabled={busy || isClientView} value={ticket.status} onChange={(event) => runAction("updateTicket", { ticketId: ticket.id, field: "status", value: event.target.value }, `Status changed to ${event.target.value}`)}>{statusOptions.map((status) => <option key={status}>{status}</option>)}</select></label><label>Priority<select disabled={busy || isClientView} value={ticket.priority} onChange={(event) => runAction("updateTicket", { ticketId: ticket.id, field: "priority", value: event.target.value }, `Priority changed to ${event.target.value}`)}>{["Urgent", "High", "Normal", "Low"].map((priority) => <option key={priority}>{priority}</option>)}</select></label><label>Assignee<select disabled={busy || isClientView} value={ticket.assignee} onChange={(event) => runAction("updateTicket", { ticketId: ticket.id, field: "assignee", value: event.target.value }, `Assigned to ${event.target.value}`)}>{people.map((person) => <option key={person}>{person}</option>)}</select></label><label>Release<span>{release?.version} · {ticket.build}</span></label></section><section className="context-panel"><header><MonitorSmartphone size={15} /> Captured context</header><dl><div><dt>Page</dt><dd>{ticket.page_url || "Not supplied"}</dd></div><div><dt>Browser</dt><dd>{ticket.browser || "Not supplied"}</dd></div><div><dt>Viewport</dt><dd>{ticket.viewport || "Not supplied"}</dd></div><div><dt>Reporter</dt><dd>{ticket.reporter}</dd></div></dl></section>{isClientView && canRespond && ticket.status === "Ready for retest" ? <section className="retest-panel"><div><RefreshCcw size={18} /><span><b>A fix is ready to test</b><small>Confirm the result in {release?.build}.</small></span></div><footer><button className="secondary-button" onClick={() => runAction("updateTicket", { ticketId: ticket.id, field: "status", value: "Reopened" }, "Feedback reopened")}>Still broken</button><button className="primary-button" onClick={() => runAction("updateTicket", { ticketId: ticket.id, field: "status", value: "Verified" }, "Fix verified")}>Verify fix</button></footer></section> : null}<section className="conversation"><header><div><p>Conversation</p><h3>{visibleComments.length} updates</h3></div></header>{visibleComments.map((comment) => <div className={`comment ${comment.visibility}`} key={comment.id}><span className="avatar small">{initials(comment.author)}</span><div><p><b>{comment.author}</b>{comment.visibility === "internal" ? <em>Internal</em> : null}<time>{formatDate(comment.created_at)}</time></p><div>{comment.body}</div></div></div>)}{canRespond ? <form className="reply-form" onSubmit={submitReply}><textarea name="body" placeholder={isClientView ? "Reply to the delivery team" : "Add an update"} required />{!isClientView ? <label><input type="checkbox" name="visibility" value="internal" /> Internal note</label> : <span />}<button className="primary-button" disabled={busy}><Send size={14} /> Send</button></form> : <p className="approval-note">This account has read-only access to the conversation.</p>}</section></div></aside></div>;
+  const ticketAttachments = attachments.filter((attachment) => !attachment.comment_id);
+  const commentAttachment = (commentId: string) => attachments.find((attachment) => attachment.comment_id === commentId);
+  const chip = slaChip(ticket);
+  const isReporter = ticket.reporter === actor.name;
+  const canEdit = !isClientView || (isReporter && canRespond && ["Submitted", "Triaged", "Needs information"].includes(ticket.status));
+  const canWithdraw = !closedStatuses.has(ticket.status) && (!isClientView || (isReporter && canRespond));
+  const assignees = assigneeOptions.includes(ticket.assignee) ? assigneeOptions : [...assigneeOptions, ticket.assignee];
+  const timeline = audit.slice(0, 12);
+
+  function quickUpdate(fieldName: "status" | "priority" | "assignee", value: string, success: string) {
+    void runAction("updateTicket", { ticketId: ticket.id, field: fieldName, value }, success, (workspace) => ({
+      ...workspace,
+      tickets: workspace.tickets.map((entry) => entry.id === ticket.id ? { ...entry, [fieldName]: value } : entry),
+    }));
+  }
+
+  async function uploadScreenshot(file: File) {
+    const uploadData = new FormData();
+    uploadData.append("file", file);
+    const upload = await fetch("/api/uploads", { method: "POST", body: uploadData });
+    const body = await upload.json() as { key?: string; error?: string };
+    if (!upload.ok || !body.key) throw new Error(body.error || "Screenshot upload failed");
+    return body.key;
+  }
+
+  async function submitReply(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const body = field(form, "body");
+    if (!body) return;
+    let attachmentKey = "";
+    try {
+      const file = form.get("screenshot");
+      if (file instanceof File && file.size) attachmentKey = await uploadScreenshot(file);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Screenshot upload failed");
+      return;
+    }
+    await runAction("addComment", { ticketId: ticket.id, body, visibility: isClientView ? "public" : field(form, "visibility") || "public", ...(attachmentKey ? { attachmentKey } : {}) }, "Update added");
+    formElement.reset();
+  }
+
+  async function submitEdit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    await runAction("editTicket", {
+      ticketId: ticket.id,
+      type: field(form, "type"),
+      severity: field(form, "severity"),
+      title: field(form, "title"),
+      actual: field(form, "actual"),
+      expected: field(form, "expected"),
+      pageUrl: field(form, "pageUrl"),
+    }, "Feedback updated");
+    setEditing(false);
+  }
+
+  function withdraw() {
+    if (!window.confirm(`Withdraw ${ticket.key}? It will be closed and the other side will be notified.`)) return;
+    void runAction("withdrawTicket", { ticketId: ticket.id }, "Feedback withdrawn");
+  }
+
+  return <div className="drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><aside className="feedback-drawer">
+    <header>
+      <div><p>{ticket.key} · {project?.name}</p><h2>{ticket.title}</h2></div>
+      <span className="drawer-header-actions">
+        {canEdit && !editing ? <button onClick={() => setEditing(true)} aria-label="Edit feedback" title="Edit feedback"><Pencil size={16} /></button> : null}
+        {canWithdraw ? <button onClick={withdraw} disabled={busy} aria-label="Withdraw feedback" title="Withdraw feedback"><Trash2 size={16} /></button> : null}
+        <button onClick={close} aria-label="Close feedback"><X size={19} /></button>
+      </span>
+    </header>
+    <div className="drawer-scroll">
+      <div className="badge-row">
+        <TypeBadge value={ticket.type} /><SeverityBadge value={ticket.severity} />
+        {chip ? <SlaChip chip={chip} /> : null}
+        {ticket.duplicate_of ? <button className="duplicate-badge" onClick={() => openTicketByKey(ticket.duplicate_of || "")}><Copy size={12} /> Duplicate of {ticket.duplicate_of}</button> : null}
+      </div>
+      {editing ? (
+        <form className="edit-form surface" onSubmit={submitEdit}>
+          <label>Feedback type<select name="type" defaultValue={ticket.type}><option>Bug</option><option>Change request</option><option>Content</option><option>Question</option></select></label>
+          <label>Severity<select name="severity" defaultValue={ticket.severity}><option>Critical</option><option>High</option><option>Medium</option><option>Low</option></select></label>
+          <label className="span-2">Title<input name="title" defaultValue={ticket.title} required maxLength={180} /></label>
+          <label className="span-2">What happened?<textarea name="actual" defaultValue={ticket.actual} required /></label>
+          <label className="span-2">What was expected?<textarea name="expected" defaultValue={ticket.expected} required /></label>
+          <label className="span-2">Page or screen<input name="pageUrl" defaultValue={ticket.page_url} /></label>
+          <footer className="span-2"><button type="button" className="quiet-button" onClick={() => setEditing(false)}>Cancel</button><button className="primary-button" disabled={busy}>{busy ? "Saving…" : "Save changes"}</button></footer>
+        </form>
+      ) : (
+        <section className="problem-card"><div><span>Observed</span><p>{ticket.actual}</p></div><div><span>Expected</span><p>{ticket.expected}</p></div></section>
+      )}
+      {ticket.attachment_key || ticketAttachments.length ? <div className="attachment-list">
+        {ticket.attachment_key ? <a className="attachment-link" href={`/api/uploads/${encodeURIComponent(ticket.attachment_key)}`} target="_blank" rel="noreferrer"><Paperclip size={15} /> Screenshot <ExternalLink size={13} /></a> : null}
+        {ticketAttachments.map((attachment, index) => <a key={attachment.id} className="attachment-link" href={`/api/uploads/${encodeURIComponent(attachment.key)}`} target="_blank" rel="noreferrer"><Paperclip size={15} /> Screenshot {ticket.attachment_key ? index + 2 : index + 1} <ExternalLink size={13} /></a>)}
+      </div> : null}
+      <section className="property-grid">
+        <label>Status<select disabled={busy || isClientView} value={ticket.status} onChange={(event) => quickUpdate("status", event.target.value, `Status changed to ${event.target.value}`)}>{statusOptions.map((status) => <option key={status}>{status}</option>)}</select></label>
+        <label>Priority<select disabled={busy || isClientView} value={ticket.priority} onChange={(event) => quickUpdate("priority", event.target.value, `Priority changed to ${event.target.value}`)}>{["Urgent", "High", "Normal", "Low"].map((priority) => <option key={priority}>{priority}</option>)}</select></label>
+        <label>Assignee<select disabled={busy || isClientView} value={ticket.assignee} onChange={(event) => quickUpdate("assignee", event.target.value, `Assigned to ${event.target.value}`)}>{assignees.map((person) => <option key={person}>{person}</option>)}</select></label>
+        <label>Release<span>{release?.version} · {ticket.build}</span></label>
+      </section>
+      {!isClientView && !ticket.duplicate_of ? (
+        duplicatePicker ? (
+          <div className="duplicate-picker">
+            <span>Duplicate of</span>
+            <select defaultValue="" onChange={(event) => { const key = event.target.value; if (key) { setDuplicatePicker(false); void runAction("markDuplicate", { ticketId: ticket.id, duplicateKey: key }, `${ticket.key} marked as duplicate of ${key}`); } }}>
+              <option value="" disabled>Choose the original feedback</option>
+              {siblingTickets.map((item) => <option key={item.id} value={item.key}>{item.key} · {item.title.slice(0, 60)}</option>)}
+            </select>
+            <button className="quiet-button" onClick={() => setDuplicatePicker(false)}>Cancel</button>
+          </div>
+        ) : (
+          <button className="link-button" onClick={() => setDuplicatePicker(true)}><Copy size={13} /> Mark as duplicate of another feedback</button>
+        )
+      ) : null}
+      <section className="context-panel"><header><MonitorSmartphone size={15} /> Captured context</header><dl><div><dt>Page</dt><dd>{ticket.page_url || "Not supplied"}</dd></div><div><dt>Browser</dt><dd>{ticket.browser || "Not supplied"}</dd></div><div><dt>Viewport</dt><dd>{ticket.viewport || "Not supplied"}</dd></div><div><dt>Reporter</dt><dd>{ticket.reporter}</dd></div></dl></section>
+      {isClientView && canRespond && ticket.status === "Ready for retest" ? <section className="retest-panel"><div><RefreshCcw size={18} /><span><b>A fix is ready to test</b><small>Confirm the result in {release?.build}.</small></span></div><footer><button className="secondary-button" onClick={() => runAction("updateTicket", { ticketId: ticket.id, field: "status", value: "Reopened" }, "Feedback reopened")}>Still broken</button><button className="primary-button" onClick={() => runAction("updateTicket", { ticketId: ticket.id, field: "status", value: "Verified" }, "Fix verified")}>Verify fix</button></footer></section> : null}
+      {timeline.length ? <section className="ticket-timeline">
+        <header><Activity size={14} /> History</header>
+        <div>{timeline.map((event) => <div key={event.id} className="timeline-row"><span className="timeline-dot" /><p><b>{event.action}</b>{event.details ? <>· {event.details}</> : null}<small>{event.actor} · {formatDate(event.created_at, true)}</small></p></div>)}</div>
+      </section> : null}
+      <section className="conversation">
+        <header><div><p>Conversation</p><h3>{visibleComments.length} updates</h3></div></header>
+        {visibleComments.map((comment) => {
+          const attachment = commentAttachment(comment.id);
+          return <div className={`comment ${comment.visibility}`} key={comment.id}><span className="avatar small">{initials(comment.author)}</span><div><p><b>{comment.author}</b>{comment.visibility === "internal" ? <em>Internal</em> : null}<time>{formatDate(comment.created_at)}</time></p><div>{comment.body}</div>{attachment ? <a className="attachment-link small" href={`/api/uploads/${encodeURIComponent(attachment.key)}`} target="_blank" rel="noreferrer"><Paperclip size={13} /> Attached screenshot <ExternalLink size={12} /></a> : null}</div></div>;
+        })}
+        {canRespond ? <form className="reply-form" onSubmit={submitReply}>
+          <textarea name="body" placeholder={isClientView ? "Reply to the delivery team" : "Add an update"} required />
+          <label className="reply-attach" title="Attach a screenshot"><Paperclip size={14} /><input name="screenshot" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /><span>Screenshot</span></label>
+          {!isClientView ? <label><input type="checkbox" name="visibility" value="internal" /> Internal note</label> : <span />}
+          <button className="primary-button" disabled={busy}><Send size={14} /> Send</button>
+        </form> : <p className="approval-note">This account has read-only access to the conversation.</p>}
+      </section>
+    </div>
+  </aside></div>;
 }
 
-function ActionModal({ modal, data, isClientView, selectedRelease, memberClientId, close, runAction, busy, notify }: { modal: Exclude<Modal, null>; data: Workspace; isClientView: boolean; selectedRelease?: Release; memberClientId: string | null; close: () => void; runAction: (action: string, payload: ActionPayload, success: string) => Promise<void>; busy: boolean; notify: (message: string) => void }) {
+function ActionModal({ modal, data, isClientView, selectedRelease, memberClientId, prefill, close, runAction, busy, notify }: { modal: Exclude<Modal, null>; data: Workspace; isClientView: boolean; selectedRelease?: Release; memberClientId: string | null; prefill: ReportPrefill | null; close: () => void; runAction: RunAction; busy: boolean; notify: (message: string) => void }) {
   const isAgencyMember = modal === "member" && memberClientId === "agency";
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = new FormData(event.currentTarget);
@@ -538,18 +896,25 @@ function ActionModal({ modal, data, isClientView, selectedRelease, memberClientI
       if (modal === "member") return runAction("createMember", { clientId: isAgencyMember ? "" : memberClientId || field(form, "clientId"), name: field(form, "name"), email: field(form, "email"), role: field(form, "role") }, "Member access created");
       if (modal === "project") return runAction("createProject", { clientId: field(form, "clientId"), name: field(form, "name"), code: field(form, "code"), description: field(form, "description"), manager: field(form, "manager"), stage: "UAT", stagingUrl: field(form, "stagingUrl") }, "Project created");
       if (modal === "release") return runAction("createRelease", { projectId: field(form, "projectId"), name: field(form, "name"), version: field(form, "version"), build: field(form, "build"), startDate: field(form, "startDate"), dueDate: field(form, "dueDate"), testingNotes: field(form, "testingNotes"), checklist: field(form, "checklist").split("\n").filter(Boolean) }, "Release prepared");
-      const file = form.get("screenshot"); let attachmentKey = "";
-      if (file instanceof File && file.size) { const uploadData = new FormData(); uploadData.append("file", file); const upload = await fetch("/api/uploads", { method: "POST", body: uploadData }); const body = await upload.json() as { key?: string; error?: string }; if (!upload.ok || !body.key) throw new Error(body.error || "Screenshot upload failed"); attachmentKey = body.key; }
+      const files = form.getAll("screenshot").filter((entry): entry is File => entry instanceof File && entry.size > 0).slice(0, 3);
+      const attachmentKeys: string[] = [];
+      for (const file of files) {
+        const uploadData = new FormData(); uploadData.append("file", file);
+        const upload = await fetch("/api/uploads", { method: "POST", body: uploadData });
+        const body = await upload.json() as { key?: string; error?: string };
+        if (!upload.ok || !body.key) throw new Error(body.error || "Screenshot upload failed");
+        attachmentKeys.push(body.key);
+      }
       const releaseId = field(form, "releaseId") || selectedRelease?.id || data.releases[0]?.id; const release = data.releases.find((item) => item.id === releaseId);
       if (!release) throw new Error("Choose a release before reporting feedback");
-      await runAction("createTicket", { projectId: release.project_id, releaseId, type: field(form, "type"), title: field(form, "title"), actual: field(form, "actual"), expected: field(form, "expected"), severity: field(form, "severity"), pageUrl: field(form, "pageUrl"), browser: navigator.userAgent, viewport: `${window.innerWidth} x ${window.innerHeight}`, build: release.build, attachmentKey }, "Feedback submitted");
+      await runAction("createTicket", { projectId: release.project_id, releaseId, type: field(form, "type"), title: field(form, "title"), actual: field(form, "actual"), expected: field(form, "expected"), severity: field(form, "severity"), pageUrl: field(form, "pageUrl"), browser: navigator.userAgent, viewport: prefill?.viewport || `${window.innerWidth} x ${window.innerHeight}`, build: release.build, attachmentKeys }, "Feedback submitted");
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to save");
     }
   }
   const title = modal === "member" && isAgencyMember ? "Add internal teammate" : ({ feedback: "Report feedback", project: "Create project", release: "Prepare release", client: "Create client workspace", member: "Invite workspace member" } as Record<Exclude<Modal, null>, string>)[modal];
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section className="modal-card" role="dialog" aria-modal="true" aria-label={title}><header><div><p>DeliveryLoop</p><h2>{title}</h2></div><button onClick={close} aria-label="Close"><X size={19} /></button></header><form onSubmit={submit}>
-    {modal === "feedback" ? <><label className="span-2">Release<select name="releaseId" defaultValue={selectedRelease?.id || data.releases[0]?.id}>{data.releases.map((release) => <option key={release.id} value={release.id}>{data.projects.find((project) => project.id === release.project_id)?.name} · {release.version}</option>)}</select></label><label>Feedback type<select name="type" defaultValue="Bug"><option>Bug</option><option>Change request</option><option>Content</option><option>Question</option></select></label><label>Severity<select name="severity" defaultValue="Medium"><option>Critical</option><option>High</option><option>Medium</option><option>Low</option></select></label><label className="span-2">Short title<input name="title" placeholder="Describe the issue clearly" required /></label><label className="span-2">What happened?<textarea name="actual" placeholder="What did you see and how did you get here?" required /></label><label className="span-2">What did you expect?<textarea name="expected" placeholder="Describe the expected result" required /></label><label className="span-2">Page or screen<input name="pageUrl" placeholder="/checkout/payment or a staging URL" /></label><label className="span-2 upload-field"><UploadCloud size={18} /><span><b>Attach a screenshot</b><small>PNG, JPG, WebP or GIF, up to 8 MB</small></span><input name="screenshot" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /></label></> : null}
+    {modal === "feedback" ? <><label className="span-2">Release<select name="releaseId" defaultValue={selectedRelease?.id || data.releases[0]?.id}>{data.releases.map((release) => <option key={release.id} value={release.id}>{data.projects.find((project) => project.id === release.project_id)?.name} · {release.version}</option>)}</select></label><label>Feedback type<select name="type" defaultValue="Bug"><option>Bug</option><option>Change request</option><option>Content</option><option>Question</option></select></label><label>Severity<select name="severity" defaultValue="Medium"><option>Critical</option><option>High</option><option>Medium</option><option>Low</option></select></label><label className="span-2">Short title<input name="title" placeholder="Describe the issue clearly" required /></label><label className="span-2">What happened?<textarea name="actual" placeholder="What did you see and how did you get here?" required /></label><label className="span-2">What did you expect?<textarea name="expected" placeholder="Describe the expected result" required /></label><label className="span-2">Page or screen<input name="pageUrl" defaultValue={prefill?.pageUrl || ""} placeholder="/checkout/payment or a staging URL" /></label><label className="span-2 upload-field"><UploadCloud size={18} /><span><b>Attach screenshots</b><small>Up to 3 images · PNG, JPG, WebP or GIF, 8 MB each</small></span><input name="screenshot" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" /></label>{prefill?.pageUrl ? <div className="modal-callout span-2"><MonitorSmartphone size={16} /><span>Captured from the staging page{prefill.viewport ? ` at ${prefill.viewport}` : ""}. Check the details and submit.</span></div> : null}</> : null}
     {modal === "client" ? <><label className="span-2">Company name<input name="name" required placeholder="Acme Limited" /></label><label>Primary contact<input name="contactName" required placeholder="Contact name" /></label><label>Email<input name="contactEmail" type="email" required placeholder="client@company.com" /></label><label className="span-2">Workspace colour<input name="accent" type="color" defaultValue="#3157D5" /></label></> : null}
     {modal === "member" ? <><div className="modal-callout span-2"><ShieldCheck size={17} /><span>An activation email is sent to this exact address. Registration is invitation-only.</span></div>{!isAgencyMember ? <label className="span-2">Client<select name="clientId" defaultValue={memberClientId || ""} disabled={Boolean(memberClientId)}>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</select></label> : null}<label>Name<input name="name" required maxLength={120} placeholder="Full name" /></label><label>Email<input name="email" type="email" required maxLength={254} placeholder={isAgencyMember ? "person@agency.com" : "person@client.com"} /></label><label className="span-2">Role<select name="role" defaultValue={isAgencyMember ? "project_manager" : "client_tester"}>{isAgencyMember ? <><option value="agency_admin">Agency admin</option><option value="project_manager">Project manager</option><option value="developer">Developer</option></> : <><option value="client_admin">Client admin</option><option value="client_tester">Client tester</option><option value="client_viewer">Client viewer</option></>}</select></label></> : null}
     {modal === "project" ? <><label className="span-2">Client<select name="clientId">{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</select></label><label>Project name<input name="name" required placeholder="Customer portal" /></label><label>Project code<input name="code" required maxLength={8} placeholder="CPT" /></label><label className="span-2">Purpose<textarea name="description" required placeholder="What is being delivered?" /></label><label>Project lead<input name="manager" required placeholder="Team member" /></label><label>Staging URL<input name="stagingUrl" type="url" placeholder="https://staging.example.com" /></label></> : null}

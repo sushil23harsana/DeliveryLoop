@@ -1,7 +1,9 @@
 import { assertAuthConfigured, auth } from "../auth";
 import { AccessError, resolveActor, type Actor } from "../../db/workspace";
 
-export type ActionPayload = Record<string, string> & { checklist?: string[] };
+export type ActionPayload = Record<string, string> & { checklist?: string[]; attachmentKeys?: string[] };
+
+const ARRAY_PAYLOAD_KEYS = new Set(["checklist", "attachmentKeys"]);
 
 function localDemoAllowed(request: Request) {
   const hostname = new URL(request.url).hostname;
@@ -41,8 +43,9 @@ export async function parseActionRequest(request: Request): Promise<{ action: st
   const payload: ActionPayload = {};
   for (const [key, value] of Object.entries(record.payload as Record<string, unknown>)) {
     if (typeof value === "string") payload[key] = value;
-    else if (key === "checklist" && Array.isArray(value) && value.every((item) => typeof item === "string")) payload.checklist = value;
-    else throw new AccessError(`Invalid value for ${key}`, 400);
+    else if (ARRAY_PAYLOAD_KEYS.has(key) && Array.isArray(value) && value.length <= 60 && value.every((item) => typeof item === "string")) {
+      payload[key as "checklist" | "attachmentKeys"] = value as string[];
+    } else throw new AccessError(`Invalid value for ${key}`, 400);
   }
   return { action: record.action, payload };
 }

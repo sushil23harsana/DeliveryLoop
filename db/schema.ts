@@ -146,9 +146,19 @@ export const tickets = sqliteTable("tickets", {
   viewport: text("viewport").notNull().default(""),
   build: text("build").notNull().default(""),
   attachmentKey: text("attachment_key"),
+  duplicateOf: text("duplicate_of"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+export const attachments = sqliteTable("attachments", {
+  id: text("id").primaryKey(),
+  ticketId: text("ticket_id").notNull().references(() => tickets.id),
+  commentId: text("comment_id"),
+  key: text("key").notNull(),
+  uploadedBy: text("uploaded_by").notNull().default(""),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [index("attachments_ticket_idx").on(table.ticketId)]);
 
 export const comments = sqliteTable("comments", {
   id: text("id").primaryKey(),
