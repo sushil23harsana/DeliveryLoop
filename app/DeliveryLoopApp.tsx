@@ -5,7 +5,6 @@ import {
   Activity,
   AlertCircle,
   AlertTriangle,
-  ArrowUpRight,
   BarChart3,
   Bug,
   Building2,
@@ -13,7 +12,6 @@ import {
   CalendarRange,
   Check,
   CheckCircle2,
-  ChevronRight,
   Clock3,
   Copy,
   Download,
@@ -133,6 +131,11 @@ function daysSince(value: string) {
   return Number.isFinite(elapsed) ? Math.max(0, Math.floor(elapsed / 86400000)) : 0;
 }
 
+function relTime(value: string) {
+  const days = daysSince(value);
+  return days === 0 ? "today" : `${days}d`;
+}
+
 function slaChip(ticket: Ticket): { tone: "client" | "team"; label: string } | null {
   if (closedStatuses.has(ticket.status)) return null;
   const days = daysSince(ticket.updated_at || ticket.created_at);
@@ -143,6 +146,13 @@ function slaChip(ticket: Ticket): { tone: "client" | "team"; label: string } | n
 
 function initials(name: string) {
   return name.split(" ").filter(Boolean).map((part) => part[0]).join("").slice(0, 2).toUpperCase();
+}
+
+// Deterministic per-person avatar colour, matching the design system's hashing.
+function avatarStyle(name: string): React.CSSProperties {
+  let hue = 0;
+  for (let i = 0; i < name.length; i++) hue = (hue * 31 + name.charCodeAt(i)) % 360;
+  return { background: `oklch(0.58 0.11 ${hue})`, color: "#fff" };
 }
 
 function field(form: FormData, key: string) {
@@ -438,7 +448,7 @@ export function DeliveryLoopApp() {
             <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
           </button>
           <div className="account-row">
-            <span className="avatar">{initials(actor.name)}</span>
+            <span className="avatar" style={avatarStyle(actor.name)}>{initials(actor.name)}</span>
             <div><strong>{actor.name}</strong><small>{roleLabel(actor.role)}</small></div>
             <button className="account-signout" onClick={signOut} aria-label="Sign out" title="Sign out"><LockKeyhole size={15} /></button>
           </div>
@@ -446,17 +456,23 @@ export function DeliveryLoopApp() {
       </aside>
 
       <main className="main-panel">
+        {previewClientId ? (
+          <div className="preview-banner">
+            <span><Eye size={14} /> Previewing the client portal as {activeClient?.name || "client"} — exactly what their team sees</span>
+            <button onClick={() => changePreview("")}>Exit preview</button>
+          </div>
+        ) : null}
         <header className="topbar">
           <div>
             <p>{isClientView ? activeClient?.name || "Client workspace" : "Delivery operations"}</p>
             <h1>{pageTitle(view, isClientView)}</h1>
           </div>
+          {canReport ? <div className="kbd-hints"><kbd>/</kbd><span>search</span><kbd>n</kbd><span>new feedback</span></div> : null}
           <div className="top-actions">
-            {previewClientId ? <button className="quiet-button" onClick={() => changePreview("")}><X size={15} /> Exit preview</button> : null}
-            {!isClientView && view === "projects" && canManageDelivery ? <button className="secondary-button" onClick={() => setModal("project")}><Plus size={15} /> New project</button> : null}
-            {!isClientView && view === "clients" && canManageClients ? <button className="secondary-button" onClick={() => setModal("client")}><Plus size={15} /> New client</button> : null}
+            {!isClientView && view === "projects" && canManageDelivery ? <button className="primary-button" onClick={() => setModal("project")}><Plus size={15} /> New project</button> : null}
+            {!isClientView && view === "clients" && canManageClients ? <button className="primary-button" onClick={() => setModal("client")}><Plus size={15} /> New client</button> : null}
             {!isClientView && view === "releases" && canManageDelivery ? <button className="primary-button" onClick={() => setModal("release")}><Plus size={15} /> New release</button> : null}
-            {!isClientView && view === "settings" && canManageClients ? <button className="secondary-button" onClick={() => openMemberModal("agency")}><UserPlus size={15} /> Add teammate</button> : null}
+            {!isClientView && view === "settings" && canManageClients ? <button className="primary-button" onClick={() => openMemberModal("agency")}><UserPlus size={15} /> Add teammate</button> : null}
             {(view === "feedback" || isClientView) && canReport ? <button className="primary-button" onClick={() => setModal("feedback")}><Plus size={15} /> Report feedback</button> : null}
           </div>
         </header>
@@ -524,47 +540,57 @@ function Overview({ data, openTickets, blockers, retest, testingReleases, setVie
       </section>
     </div>;
   }
+  const waiting = data.tickets.filter((ticket) => ["Ready for retest", "Approval required"].includes(ticket.status)).slice(0, 5);
   return <div className="page-content overview-page">
     <section className="summary-strip" aria-label="Delivery summary">
       <div><i className="metric-icon tone-brand"><PackageCheck size={16} /></i><span>Releases in UAT</span><strong>{testingReleases.length}</strong><small>{data.releases.length} releases tracked</small></div>
-      <div><i className="metric-icon tone-danger"><MessageSquareWarning size={16} /></i><span>Open feedback</span><strong>{openTickets.length}</strong><small>{blockers.length} high-impact items</small></div>
-      <div><i className="metric-icon tone-warning"><RefreshCcw size={16} /></i><span>Waiting on client</span><strong>{retest.length}</strong><small>Ready for retest</small></div>
-      <div><i className="metric-icon tone-success"><CheckCircle2 size={16} /></i><span>Closed this cycle</span><strong>{verified}</strong><small>{data.tickets.length ? Math.round((verified / data.tickets.length) * 100) : 0}% completion</small></div>
+      <div><i className="metric-icon tone-danger"><MessageSquareWarning size={16} /></i><span>Open feedback</span><strong>{openTickets.length}</strong><small>{blockers.length} high impact</small></div>
+      <div><i className="metric-icon tone-warning"><RefreshCcw size={16} /></i><span>Waiting on client</span><strong>{retest.length}</strong><small>ready for retest</small></div>
+      <div><i className="metric-icon tone-success"><CheckCircle2 size={16} /></i><span>Closed this cycle</span><strong>{verified}</strong><small>{data.tickets.length ? Math.round((verified / data.tickets.length) * 100) : 0}% of cycle feedback</small></div>
     </section>
 
     <section className="content-grid">
-      <article className="surface release-board">
-        <header className="section-header"><div><p>Live delivery</p><h2>Release readiness</h2></div><button onClick={() => setView("releases")}>All releases <ArrowUpRight size={14} /></button></header>
-        <div className="release-table">
-          <div className="release-table-head"><span>Client and release</span><span>Acceptance</span><span>Open</span><span>Due</span><span /></div>
+      <article className="surface">
+        <header className="section-header"><div><h2>Needs attention</h2></div><span className="result-count">high-impact open items</span></header>
+        <div className="attention-rows">
+          {blockers.slice(0, 6).map((ticket) => <button key={ticket.id} onClick={() => setSelectedTicketId(ticket.id)}>
+            <span className="row-key">{ticket.key}</span>
+            <span className="row-title">{ticket.title}</span>
+            <em className={`severity-flag ${ticket.severity.toLowerCase()}`}>{ticket.severity}</em>
+            <StatusBadge value={ticket.status} />
+            <time>{relTime(ticket.updated_at || ticket.created_at)}</time>
+          </button>)}
+          {!blockers.length ? <div className="compact-empty"><CheckCircle2 size={20} /><span><b>No release blockers</b><small>Everything is moving normally.</small></span></div> : null}
+        </div>
+      </article>
+
+      <div className="side-stack">
+        <article className="surface mini-panel">
+          <h2>Active releases</h2>
           {testingReleases.map((release) => {
             const project = projectById(release.project_id); const client = clientById(project?.client_id || "");
             const checks = data.checklist.filter((item) => item.release_id === release.id); const passed = checks.filter((item) => item.state === "Passed").length;
             const percent = checks.length ? Math.round((passed / checks.length) * 100) : 0;
-            const open = data.tickets.filter((ticket) => ticket.release_id === release.id && !closedStatuses.has(ticket.status)).length;
             return <button key={release.id} onClick={() => { setSelectedReleaseId(release.id); setView("releases"); }}>
-              <span className="release-name"><i style={{ background: client?.accent }}>{initials(client?.name || "CL")}</i><span><b>{project?.name}</b><small>{release.version} · {release.name}</small></span></span>
-              <span className="progress-cell"><span><i style={{ width: `${percent}%` }} /></span><small>{percent}%</small></span>
-              <span className={open ? "number-cell warning" : "number-cell"}>{open}</span>
-              <span className="date-cell">{formatDate(release.due_date)}</span>
-              <ChevronRight size={16} />
+              <span className="mini-release-line"><span className="mono-ver">{project?.code} {release.version}</span><b>{release.name}</b><small>{percent}%</small></span>
+              <span className="mini-meter"><i style={{ width: `${percent}%` }} /></span>
+              <span className="mini-sub">{client?.name} · checklist progress · due {formatDate(release.due_date)}</span>
             </button>;
           })}
-        </div>
-      </article>
-
-      <article className="surface attention-panel">
-        <header className="section-header"><div><p>Priority queue</p><h2>Needs attention</h2></div><span className="count-badge">{blockers.length}</span></header>
-        <div className="attention-list">
-          {blockers.slice(0, 5).map((ticket) => <button key={ticket.id} onClick={() => setSelectedTicketId(ticket.id)}><span className={`severity-marker ${ticket.severity.toLowerCase()}`} /><span><b>{ticket.title}</b><small>{ticket.key} · {ticket.status}</small></span><em>{ticket.severity}</em></button>)}
-          {!blockers.length ? <div className="compact-empty"><CheckCircle2 size={20} /><span><b>No release blockers</b><small>Everything is moving normally.</small></span></div> : null}
-        </div>
-      </article>
-    </section>
-
-    <section className="content-grid lower">
-      <article className="surface"><header className="section-header"><div><p>Latest reports</p><h2>Recent feedback</h2></div><button onClick={() => setView("feedback")}>Open inbox <ArrowUpRight size={14} /></button></header><FeedbackTable tickets={data.tickets.slice(0, 5)} projects={data.projects} onOpen={setSelectedTicketId} compact /></article>
-      <article className="surface activity-panel"><header className="section-header"><div><p>Evidence trail</p><h2>Recent activity</h2></div><Activity size={17} /></header><div className="activity-list">{data.audit.slice(0, 5).map((event) => <div key={event.id}><span><CircleDotIcon /></span><p><b>{event.action}</b><small>{event.actor} · {event.details || formatDate(event.created_at)}</small></p></div>)}</div></article>
+          {!testingReleases.length ? <div className="compact-empty"><PackageCheck size={20} /><span><b>No releases in testing</b><small>Prepare one from the Releases page.</small></span></div> : null}
+        </article>
+        <article className="surface mini-panel">
+          <h2>Waiting on client</h2>
+          {waiting.map((ticket) => <button key={ticket.id} onClick={() => setSelectedTicketId(ticket.id)}>
+            <span className="waiting-row"><span className="row-key">{ticket.key}</span><b>{ticket.title}</b><StatusBadge value={ticket.status} /></span>
+          </button>)}
+          {!waiting.length ? <div className="compact-empty"><CheckCircle2 size={20} /><span><b>Nothing pending</b><small>No items are waiting on the client.</small></span></div> : null}
+        </article>
+        <article className="surface mini-panel">
+          <h2>Recent activity</h2>
+          <div className="activity-list">{data.audit.slice(0, 4).map((event) => <div key={event.id}><span><CircleDotIcon /></span><p><b>{event.action}</b><small>{event.actor} · {event.details || formatDate(event.created_at)}</small></p></div>)}</div>
+        </article>
+      </div>
     </section>
   </div>;
 }
@@ -591,7 +617,29 @@ function Projects({ data, isClientView, canManageDelivery, clientById, setView, 
     const scopeVersion = (data.scope || []).filter((version) => version.project_id === project.id).length;
     const behindCount = (data.phases || []).filter((phase) => phase.project_id === project.id && phaseBehind(phase, today)).length;
     const teamNames = (data.projectTeam || []).filter((row) => row.project_id === project.id).map((row) => memberNameById.get(row.member_id)).filter((name): name is string => Boolean(name));
-    return <article className="project-row-card" key={project.id}><div className="project-identity"><span style={{ background: client?.accent }}>{project.code}</span><div><p>{client?.name}</p><h2>{project.name}</h2><small>{project.description}</small></div></div><dl><div><dt>Lead</dt><dd>{project.manager}</dd></div><div><dt>Stage</dt><dd><StatusBadge value={project.stage} /></dd></div><div><dt>Open feedback</dt><dd>{tickets.filter((ticket) => !closedStatuses.has(ticket.status)).length}</dd></div><div><dt>Current release</dt><dd>{current?.version || "—"}</dd></div></dl>{!isClientView ? <div className="project-team-row"><span className="project-team-label"><Users size={13} /> Team</span>{teamNames.length ? teamNames.map((name) => <span key={name} className="team-chip" title={name}><b>{initials(name)}</b><i>{name}</i></span>) : <span className="team-open-note">Open to all teammates</span>}{canManageDelivery ? <button className="quiet-button" onClick={() => setTeamProjectId(project.id)}><UserPlus size={13} /> Manage team</button> : null}</div> : null}<div className="row-actions"><button className="quiet-button" title="Agreed scope of work with full version history" onClick={() => setScopeProjectId(project.id)}><FileText size={14} /> Scope of work{scopeVersion ? <em className="scope-version-chip">v{scopeVersion}</em> : null}</button><button className="quiet-button" title="Phase plan and Gantt timeline" onClick={() => setView("timeline")}><CalendarRange size={14} /> Timeline{behindCount ? <em className="phase-risk-chip" title={`${behindCount} phase${behindCount === 1 ? " is" : "s are"} past the planned end date`}>{behindCount} behind</em> : null}</button><button className="quiet-button" title="Copy a bookmarklet that opens a prefilled feedback form from any staging page" onClick={() => copyBookmarklet(project.name)}><Copy size={14} /> Capture tool</button>{project.staging_url ? <a href={project.staging_url} target="_blank" rel="noreferrer" className="quiet-button">Staging <ExternalLink size={14} /></a> : null}{current ? <button className="secondary-button" onClick={() => { setSelectedReleaseId(current.id); setView("releases"); }}>View release <ChevronRight size={14} /></button> : null}</div>{isClientView ? <span className="client-access-note"><ShieldCheck size={14} /> Your organisation only</span> : null}</article>;
+    const openCount = tickets.filter((ticket) => !closedStatuses.has(ticket.status)).length;
+    return <article className="surface project-card" key={project.id}>
+      <div className="project-card-head">
+        <span className="project-code" style={{ background: client?.accent }}>{project.code}</span>
+        <div><h2>{project.name}</h2><small>{client?.name}</small></div>
+        <StatusBadge value={project.stage} />
+      </div>
+      <p className="project-desc">{project.description}</p>
+      <div className="project-facts">
+        <span className="lead-chip"><i style={avatarStyle(project.manager)}>{initials(project.manager)}</i>{project.manager}</span>
+        <span><strong>{openCount}</strong> open feedback</span>
+        <span>current <strong className="mono">{current?.version || "—"}</strong></span>
+        {isClientView ? <span className="client-access-note"><ShieldCheck size={13} /> Your organisation only</span> : null}
+      </div>
+      {!isClientView ? <div className="project-team-row"><span className="project-team-label"><Users size={13} /> Team</span>{teamNames.length ? teamNames.map((name) => <span key={name} className="team-chip" title={name}><b style={avatarStyle(name)}>{initials(name)}</b><i>{name}</i></span>) : <span className="team-open-note">Open to all teammates</span>}{canManageDelivery ? <button className="quiet-button" onClick={() => setTeamProjectId(project.id)}><UserPlus size={13} /> Manage</button> : null}</div> : null}
+      <div className="row-actions">
+        <button className="quiet-button" title="Agreed scope of work with full version history" onClick={() => setScopeProjectId(project.id)}><FileText size={13} /> Scope{scopeVersion ? <em className="scope-version-chip">v{scopeVersion}</em> : null}</button>
+        <button className="quiet-button" title="Phase plan and Gantt timeline" onClick={() => setView("timeline")}><CalendarRange size={13} /> Timeline{behindCount ? <em className="phase-risk-chip" title={`${behindCount} phase${behindCount === 1 ? " is" : "s are"} past the planned end date`}>{behindCount} behind</em> : null}</button>
+        <button className="quiet-button" title="Copy a bookmarklet that opens a prefilled feedback form from any staging page" onClick={() => copyBookmarklet(project.name)}><Copy size={13} /> Capture tool</button>
+        {project.staging_url ? <a href={project.staging_url} target="_blank" rel="noreferrer" className="quiet-button">Staging <ExternalLink size={13} /></a> : null}
+        {current ? <button className="secondary-button" onClick={() => { setSelectedReleaseId(current.id); setView("releases"); }}>View release</button> : null}
+      </div>
+    </article>;
   })}</div>
   {!isClientView && data.directory?.length ? <section className="project-directory">
     <header className="section-header"><div><p>Rest of the agency</p><h2>Other projects in progress</h2></div></header>
@@ -600,7 +648,7 @@ function Projects({ data, isClientView, canManageDelivery, clientById, setView, 
         <div className="directory-top"><span className="directory-code">{project.code}</span><StatusBadge value={project.stage} /></div>
         <h3>{project.name}</h3>
         <p>{clientById(project.client_id)?.name || "Agency client"} · led by {project.manager}</p>
-        <div className="directory-team">{project.team.length ? project.team.map((name) => <span key={name} className="team-chip" title={name}><b>{initials(name)}</b><i>{name}</i></span>) : <span className="team-open-note">Team not listed</span>}</div>
+        <div className="directory-team">{project.team.length ? project.team.map((name) => <span key={name} className="team-chip" title={name}><b style={avatarStyle(name)}>{initials(name)}</b><i>{name}</i></span>) : <span className="team-open-note">Team not listed</span>}</div>
         <span className="directory-lock"><LockKeyhole size={12} /> Overview only — you are not on this project&apos;s team</span>
       </article>)}
     </div>
@@ -772,20 +820,21 @@ function Releases({ data, actor, isClientView, selectedRelease, setSelectedRelea
   const canSign = ["agency_admin", "project_manager", "client_admin"].includes(actor.role);
   const canTest = actor.isStaff || ["client_admin", "client_tester"].includes(actor.role);
   const approvalEvent = data.audit.find((event) => event.entity_id === selectedRelease.id && event.action === "Release approved");
-  const cycle = (state: string) => state === "Not tested" ? "Passed" : state === "Passed" ? "Failed" : "Not tested";
-  function toggleCheck(item: ChecklistItem) {
-    const next = cycle(item.state);
+  function setCheck(item: ChecklistItem, next: string) {
+    if (next === item.state) return;
     void runAction("updateChecklist", { itemId: item.id, state: next }, `Updated “${item.title}”`, (workspace) => ({
       ...workspace,
       checklist: workspace.checklist.map((entry) => entry.id === item.id ? { ...entry, state: next } : entry),
     }));
   }
+  const passedCount = checks.filter((item) => item.state === "Passed").length;
+  const checkPercent = checks.length ? Math.round((passedCount / checks.length) * 100) : 0;
   return <div className="page-content release-page">
     <aside className="release-index"><p>Release history</p>{data.releases.map((release) => <button key={release.id} className={release.id === selectedRelease.id ? "active" : ""} onClick={() => setSelectedReleaseId(release.id)}><span className={`release-dot ${release.status.toLowerCase()}`} /><span><b>{release.version}</b><small>{release.name}</small></span><time>{formatDate(release.due_date)}</time></button>)}</aside>
     <section className="release-content">
       <article className="release-summary surface"><div className="release-summary-top"><div className="release-title"><span style={{ background: client?.accent }}>{initials(client?.name || "CL")}</span><div><p>{client?.name} / {project?.name}</p><h2>{selectedRelease.name}</h2><small>{selectedRelease.version} · {selectedRelease.build}</small></div></div><span className="release-summary-actions"><button className="quiet-button" onClick={() => setPrintReleaseId(selectedRelease.id)}><Printer size={15} /> Acceptance report</button><StatusBadge value={selectedRelease.status} /></span></div><p className="release-brief">{selectedRelease.testing_notes}</p><dl><div><CalendarDays size={16} /><span><dt>Testing window</dt><dd>{formatDate(selectedRelease.start_date)} – {formatDate(selectedRelease.due_date, true)}</dd></span></div><div><Inbox size={16} /><span><dt>Feedback</dt><dd>{open.length} open / {releaseTickets.length} total</dd></span></div><div><AlertTriangle size={16} /><span><dt>Blocking</dt><dd className={blockers.length ? "danger-text" : "success-text"}>{blockers.length || "Clear"}</dd></span></div></dl></article>
       <div className="release-workspace">
-        <article className="surface checklist-panel"><header className="section-header"><div><p>Acceptance scope</p><h2>UAT checklist</h2></div><span className="fraction">{checks.filter((item) => item.state === "Passed").length} / {checks.length}</span></header><div className="checklist-list">{checks.map((item) => <button key={item.id} disabled={busy || selectedRelease.status === "Approved" || !canTest} onClick={() => toggleCheck(item)}><span className={`check-box ${item.state.toLowerCase().replace(" ", "-")}`}>{item.state === "Passed" ? <Check size={14} /> : item.state === "Failed" ? <X size={14} /> : null}</span><span><b>{item.title}</b><small>{item.state}</small></span></button>)}</div></article>
+        <article className="surface checklist-panel"><header className="section-header"><div><p>Acceptance scope</p><h2>UAT checklist</h2></div><span className="fraction">{passedCount}/{checks.length} passed</span></header><div className="checklist-meter"><i style={{ width: `${checkPercent}%` }} /></div><div className="checklist-list">{checks.map((item) => <div key={item.id}><span className="check-title">{item.title}</span>{["Not tested", "Passed", "Failed"].map((state) => <button key={state} className={`check-chip ${item.state === state ? `on ${state === "Not tested" ? "none" : state.toLowerCase()}` : ""}`} disabled={busy || selectedRelease.status === "Approved" || !canTest} onClick={() => setCheck(item, state)}>{state}</button>)}</div>)}</div></article>
         <article className="surface approval-panel"><header className="section-header"><div><p>Delivery gate</p><h2>{selectedRelease.status === "Approved" ? "Release accepted" : "Client sign-off"}</h2></div><ShieldCheck size={18} /></header>{selectedRelease.status === "Approved" ? <div className="approved-state"><CheckCircle2 size={28} /><h3>Accepted by {selectedRelease.approved_by}</h3><p>{formatDate(selectedRelease.approved_at || "", true)}</p>{approvalEvent?.details && approvalEvent.details !== "No exceptions" ? <span className="approved-exceptions"><b>Recorded exceptions</b>{approvalEvent.details}</span> : null}<small>The immutable audit event has been recorded.</small></div> : <><div className="gate-list"><GateRow passed={!blockers.length} title="No open blockers" detail={blockers.length ? `${blockers.length} high-impact items remain` : "Requirement met"} /><GateRow passed={!incomplete.length} title="Checklist complete" detail={incomplete.length ? `${incomplete.length} checks are not passed` : "Requirement met"} /><GateRow passed={canSign} title="Authorised approver" detail={canSign ? roleLabel(actor.role) : "Client admin approval required"} /></div>{canApprove && canSign ? <label className="exceptions-field">Exceptions to record (optional)<textarea value={exceptions} maxLength={1000} onChange={(event) => setExceptions(event.target.value)} placeholder="Agreed items that ship despite being open, e.g. deferred content fixes" /></label> : null}<button className="primary-button full" disabled={!canApprove || !canSign || busy} onClick={() => runAction("approveRelease", { releaseId: selectedRelease.id, exceptions: exceptions.trim() }, "Release approved and recorded")}>{canApprove && canSign ? "Approve release" : "Complete the gates above"}</button><p className="approval-note">Approval captures the release build, approver, timestamp and any recorded exceptions.</p></>}</article>
       </div>
       {isClientView ? <div className="client-help"><ShieldCheck size={17} /><span><b>You are reviewing your organisation’s release.</b><small>Internal delivery notes and other client workspaces are hidden.</small></span></div> : null}
@@ -886,13 +935,12 @@ function FeedbackBoard({ tickets, onOpen, isStaff, unreadIds, runAction }: { tic
         <div className="board-cards">
           {columnTickets.map((ticket) => {
             const chip = slaChip(ticket);
-            const Icon = feedbackIcons[ticket.type] || MessageCircleQuestion;
             return <button key={ticket.id} className="board-card" draggable={isStaff}
               onDragStart={(event) => event.dataTransfer.setData("text/deliveryloop-ticket", ticket.id)}
               onClick={() => onOpen(ticket.id)}>
-              <span className="board-card-top"><i className={`feedback-type ${ticket.type.toLowerCase().replace(" ", "-")}`}><Icon size={14} /></i><small>{ticket.key}</small>{unreadIds?.has(ticket.id) ? <i className="unread-dot" title="New activity" /> : null}<em className={`severity-flag ${ticket.severity.toLowerCase()}`} title={`${ticket.severity} severity`}>{ticket.severity}</em><em className={`priority-label ${ticket.priority.toLowerCase()}`}>{ticket.priority}</em></span>
+              <span className="board-card-top"><small>{ticket.key}</small>{unreadIds?.has(ticket.id) ? <i className="unread-dot" title="New activity" /> : null}<em className={`severity-flag ${ticket.severity.toLowerCase()}`} title={`${ticket.severity} severity`}>{ticket.severity}</em></span>
               <b>{ticket.title}</b>
-              <span className="board-card-meta"><StatusBadge value={ticket.status} />{chip ? <SlaChip chip={chip} /> : null}<span className={`board-assignee ${ticket.assignee === "Unassigned" ? "empty" : ""}`} title={ticket.assignee === "Unassigned" ? "Unassigned — open the card to assign" : `Assigned to ${ticket.assignee}`}>{ticket.assignee === "Unassigned" ? "?" : initials(ticket.assignee)}</span></span>
+              <span className="board-card-meta"><TypeBadge value={ticket.type} />{chip ? <SlaChip chip={chip} /> : null}<span className={`board-assignee ${ticket.assignee === "Unassigned" ? "empty" : ""}`} style={ticket.assignee === "Unassigned" ? undefined : avatarStyle(ticket.assignee)} title={ticket.assignee === "Unassigned" ? "Unassigned — open the card to assign" : `Assigned to ${ticket.assignee}`}>{ticket.assignee === "Unassigned" ? "?" : initials(ticket.assignee)}</span></span>
             </button>;
           })}
           {!columnTickets.length ? <div className="board-empty">Nothing here</div> : null}
@@ -907,10 +955,17 @@ function SlaChip({ chip }: { chip: { tone: "client" | "team"; label: string } })
 }
 
 function FeedbackTable({ tickets, projects, onOpen, unreadIds, compact = false }: { tickets: Ticket[]; projects: Project[]; onOpen: (id: string) => void; unreadIds?: Set<string>; compact?: boolean }) {
-  return <div className={`feedback-table ${compact ? "compact" : ""}`}><div className="feedback-head"><span>Feedback</span><span>Project</span><span>Status</span><span>Priority</span><span>Owner</span></div>{tickets.length ? tickets.map((ticket) => {
-    const project = projects.find((item) => item.id === ticket.project_id); const Icon = feedbackIcons[ticket.type] || MessageCircleQuestion;
+  return <div className={`feedback-table ${compact ? "compact" : ""}`}><div className="feedback-head"><span>Feedback</span><span>Project</span><span>Status</span><span>Severity</span><span>Reporter</span><span className="updated-cell">Updated</span></div>{tickets.length ? tickets.map((ticket) => {
+    const project = projects.find((item) => item.id === ticket.project_id);
     const chip = compact ? null : slaChip(ticket);
-    return <button className="feedback-row" key={ticket.id} onClick={() => onOpen(ticket.id)}><span className="feedback-title"><i className={`feedback-type ${ticket.type.toLowerCase().replace(" ", "-")}`}><Icon size={15} /></i><span><b>{ticket.title}{unreadIds?.has(ticket.id) ? <i className="unread-dot" title="New activity" /> : null}</b><small>{ticket.key} · {ticket.reporter}</small></span></span><span className="project-reference"><b>{project?.code}</b><small>{project?.name}</small></span><span className="status-cell"><StatusBadge value={ticket.status} />{chip ? <SlaChip chip={chip} /> : null}</span><span className={`priority-label ${ticket.priority.toLowerCase()}`}>{ticket.priority}</span><span className="owner-cell"><i>{initials(ticket.assignee)}</i>{ticket.assignee}</span></button>;
+    return <button className="feedback-row" key={ticket.id} onClick={() => onOpen(ticket.id)}>
+      <span className="feedback-title">{unreadIds?.has(ticket.id) ? <i className="unread-dot" title="New activity" /> : null}<span className="row-key">{ticket.key}</span><b>{ticket.title}</b><TypeBadge value={ticket.type} /></span>
+      <span className="project-reference">{project?.code}</span>
+      <span className="status-cell"><StatusBadge value={ticket.status} />{chip ? <SlaChip chip={chip} /> : null}</span>
+      <span><em className={`severity-flag ${ticket.severity.toLowerCase()}`}>{ticket.severity}</em></span>
+      <span className="owner-cell"><i style={avatarStyle(ticket.reporter)}>{initials(ticket.reporter)}</i><span>{ticket.reporter}</span></span>
+      <span className="updated-cell">{relTime(ticket.updated_at || ticket.created_at)}</span>
+    </button>;
   }) : <EmptyState icon={Inbox} title="No feedback in this view" body="Change the filters or report a new issue." />}</div>;
 }
 
@@ -1017,7 +1072,7 @@ function MemberDirectory({ members, actor, runAction, busy, notify }: { members:
       const isSelf = member.id === actor.id;
       const roles = member.client_id ? [["client_admin", "Client admin"], ["client_tester", "Client tester"], ["client_viewer", "Client viewer"]] : [["agency_admin", "Agency admin"], ["project_manager", "Project manager"], ["developer", "Developer"]];
       return <div key={member.id} className={member.active === "1" ? "" : "member-suspended"}>
-        <span className="member-person"><i>{initials(member.name)}</i><span><b>{member.name}{isSelf ? <em>You</em> : null}</b><small>{member.email}</small></span></span>
+        <span className="member-person"><i style={avatarStyle(member.name)}>{initials(member.name)}</i><span><b>{member.name}{isSelf ? <em>You</em> : null}</b><small>{member.email}</small></span></span>
         <select aria-label={`Role for ${member.name}`} value={member.role} disabled={busy || isSelf || actor.role !== "agency_admin" && actor.role !== "client_admin"} onChange={(event) => runAction("updateMember", { memberId: member.id, role: event.target.value }, `Role updated for ${member.name}`)}>{roles.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
         <span className="member-activity"><Clock3 size={13} />{member.last_seen_at ? `Seen ${formatDate(member.last_seen_at)}` : `Invited ${formatDate(member.invited_at || member.created_at)}`}</span>
         <button className={member.active === "1" ? "access-toggle active" : "access-toggle"} disabled={busy || isSelf || actor.role !== "agency_admin" && actor.role !== "client_admin"} onClick={() => runAction("updateMember", { memberId: member.id, active: member.active === "1" ? "0" : "1" }, member.active === "1" ? `Access suspended for ${member.name}` : `Access restored for ${member.name}`)}>{member.active === "1" ? <><UserCheck size={14} /> Active</> : <><UserX size={14} /> Suspended</>}</button>
@@ -1168,7 +1223,7 @@ function FeedbackDrawer({ ticket, actor, project, release, comments, attachments
         <header><div><p>Conversation</p><h3>{visibleComments.length} updates</h3></div></header>
         {visibleComments.map((comment) => {
           const attachment = commentAttachment(comment.id);
-          return <div className={`comment ${comment.visibility}`} key={comment.id}><span className="avatar small">{initials(comment.author)}</span><div><p><b>{comment.author}</b>{comment.visibility === "internal" ? <em>Internal</em> : null}<time>{formatDate(comment.created_at)}</time></p><div>{comment.body}</div>{attachment ? <a className="attachment-link small" href={`/api/uploads/${encodeURIComponent(attachment.key)}`} target="_blank" rel="noreferrer"><Paperclip size={13} /> Attached screenshot <ExternalLink size={12} /></a> : null}</div></div>;
+          return <div className={`comment ${comment.visibility}`} key={comment.id}><span className="avatar small" style={avatarStyle(comment.author)}>{initials(comment.author)}</span><div><p><b>{comment.author}</b>{comment.visibility === "internal" ? <em>Internal</em> : null}<time>{formatDate(comment.created_at)}</time></p><div>{comment.body}</div>{attachment ? <a className="attachment-link small" href={`/api/uploads/${encodeURIComponent(attachment.key)}`} target="_blank" rel="noreferrer"><Paperclip size={13} /> Attached screenshot <ExternalLink size={12} /></a> : null}</div></div>;
         })}
         {canRespond ? <form className="reply-form" onSubmit={submitReply}>
           <textarea name="body" value={replyBody} onChange={(event) => setReplyBody(event.target.value)} placeholder={isClientView ? "Reply to the delivery team" : "Add an update"} required />
@@ -1209,7 +1264,7 @@ function TeamModal({ project, members, team, actor, close, runAction, busy }: { 
             const locked = isSelf && actor.role === "project_manager" && selected.includes(member.id) && selected.length > 1;
             return <label key={member.id} className={`team-member-row ${selected.includes(member.id) ? "picked" : ""}`}>
               <input type="checkbox" checked={selected.includes(member.id)} disabled={busy || locked} onChange={() => toggle(member.id)} />
-              <span className="team-member-avatar">{initials(member.name)}</span>
+              <span className="team-member-avatar" style={avatarStyle(member.name)}>{initials(member.name)}</span>
               <span className="team-member-info"><b>{member.name}{isSelf ? " (you)" : ""}</b><small>{roleLabel(member.role)} · {member.email}</small></span>
             </label>;
           })}
@@ -1378,7 +1433,7 @@ function StatusBadge({ value }: { value: string }) {
 
 function TypeBadge({ value }: { value: string }) {
   const Icon = feedbackIcons[value] || MessageCircleQuestion;
-  return <span className="type-badge"><Icon size={13} />{value}</span>;
+  return <span className={`type-badge ${value.toLowerCase().replaceAll(" ", "-")}`}><Icon size={12} />{value}</span>;
 }
 
 function SeverityBadge({ value }: { value: string }) {
