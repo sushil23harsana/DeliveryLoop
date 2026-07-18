@@ -826,10 +826,42 @@ function TimelineView({ data, canManageDelivery, isClientView, clientById, setPh
 
 type DraftPhase = { id: string; name: string; startDate: string; endDate: string; status: string };
 
+function isoFromDay(day: number) {
+  return new Date(day * DAY_MS).toISOString().slice(0, 10);
+}
+
+// Standard delivery plans so a timeline never has to be typed from scratch.
+// Durations are calendar days; every phase starts the day after the previous
+// one ends, anchored on the chosen start date.
+const PHASE_PRESETS: { id: string; label: string; hint: string; phases: { name: string; days: number }[] }[] = [
+  { id: "fast", label: "Fast-track MVP", hint: "Startup pace — scope to launch in about five weeks", phases: [
+    { name: "Discovery & scope", days: 5 }, { name: "Design", days: 5 }, { name: "Build", days: 15 }, { name: "Client UAT", days: 7 }, { name: "Launch", days: 3 },
+  ] },
+  { id: "agile", label: "Agile sprints", hint: "Sprint 0 plus three two-week sprints, then hardening, UAT and launch", phases: [
+    { name: "Sprint 0 — setup & backlog", days: 5 }, { name: "Sprint 1", days: 14 }, { name: "Sprint 2", days: 14 }, { name: "Sprint 3", days: 14 }, { name: "Hardening & client UAT", days: 7 }, { name: "Launch", days: 2 },
+  ] },
+  { id: "waterfall", label: "Waterfall", hint: "Fixed-scope contract flow — requirements through staged testing to launch", phases: [
+    { name: "Requirements", days: 7 }, { name: "Design", days: 10 }, { name: "Development", days: 28 }, { name: "Internal QA", days: 10 }, { name: "Client UAT", days: 10 }, { name: "Launch", days: 3 },
+  ] },
+  { id: "single", label: "Single window", hint: "One delivery block — simplest possible plan", phases: [
+    { name: "Delivery", days: 30 }, { name: "Client UAT & sign-off", days: 7 },
+  ] },
+];
+
 function PhaseModal({ project, phases, close, runAction, busy }: { project: Project; phases: ProjectPhase[]; close: () => void; runAction: RunAction; busy: boolean }) {
   const [rows, setRows] = useState<DraftPhase[]>(phases.length
     ? phases.map((phase) => ({ id: phase.id, name: phase.name, startDate: phase.start_date, endDate: phase.end_date, status: phase.status }))
     : [{ id: "", name: "", startDate: "", endDate: "", status: "Planned" }]);
+  const [presetStart, setPresetStart] = useState(todayIso());
+  function applyPreset(preset: typeof PHASE_PRESETS[number]) {
+    let cursor = dayNumber(presetStart || todayIso());
+    setRows(preset.phases.map((phase) => {
+      const startDate = isoFromDay(cursor);
+      const endDate = isoFromDay(cursor + phase.days - 1);
+      cursor += phase.days;
+      return { id: "", name: phase.name, startDate, endDate, status: "Planned" };
+    }));
+  }
   function update(index: number, key: keyof DraftPhase, value: string) {
     setRows((current) => current.map((row, i) => i === index ? { ...row, [key]: value } : row));
   }
@@ -852,6 +884,12 @@ function PhaseModal({ project, phases, close, runAction, busy }: { project: Proj
       <header><div><p>Project timeline</p><h2>{project.name}</h2></div><button onClick={close} aria-label="Close"><X size={19} /></button></header>
       <div className="phase-shell">
         <div className="modal-callout"><CalendarRange size={17} /><span>The dates you first save become the agreed baseline. If a phase moves later, the Gantt keeps showing the original dates underneath — and every change is recorded with your name in the audit trail.</span></div>
+        <div className="preset-row">
+          <span className="preset-label">Start from a preset</span>
+          <input type="date" value={presetStart} aria-label="Preset start date" onChange={(event) => setPresetStart(event.target.value)} />
+          {PHASE_PRESETS.map((preset) => <button key={preset.id} type="button" className="quiet-button" title={preset.hint} disabled={busy} onClick={() => applyPreset(preset)}>{preset.label}</button>)}
+        </div>
+        <p className="phase-hint preset-hint">Presets replace the rows below with a standard plan starting on the chosen date — rename phases and nudge dates freely before saving.</p>
         <div className="phase-rows">
           <div className="phase-row phase-row-head"><span>Phase</span><span>Starts</span><span>Ends</span><span>Status</span><span /></div>
           {rows.map((row, index) => <div className="phase-row" key={row.id || `new-${index}`}>
