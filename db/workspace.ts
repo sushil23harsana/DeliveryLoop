@@ -190,12 +190,16 @@ function emailAddress(input: Record<string, string>, key = "email") {
 }
 
 function safeUrl(input: Record<string, string>, key: string, label: string) {
-  const value = optional(input, key, 2048);
+  let value = optional(input, key, 2048);
   if (!value) return "";
   if (value.startsWith("/")) return value;
+  // Accept scheme-less hosts (Cloud Run, Render, Vercel, custom domains) by
+  // assuming https. Anything with an explicit scheme still must be http(s).
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value)) value = `https://${value}`;
   try {
     const parsed = new URL(value);
     if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("protocol");
+    if (!parsed.hostname.includes(".") && parsed.hostname !== "localhost") throw new Error("hostname");
     return parsed.toString();
   } catch {
     throw new AccessError(`${label} must be a valid web address`, 400);
