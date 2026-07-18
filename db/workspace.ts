@@ -123,6 +123,10 @@ const tableStatements = [
     author TEXT NOT NULL, author_role TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
+  `CREATE TABLE IF NOT EXISTS checklist_templates (
+    id TEXT PRIMARY KEY, title TEXT NOT NULL, items TEXT NOT NULL,
+    created_by TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
   `CREATE TABLE IF NOT EXISTS project_phases (
     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL,
     start_date TEXT NOT NULL, end_date TEXT NOT NULL,
@@ -370,7 +374,7 @@ export async function resolveActor(identity: { email: string; name: string } | n
 
 export async function getWorkspace(actor: Actor) {
   const db = await ensureDatabase();
-  const [clients, projects, releases, checklist, tickets, comments, audit, members, attachments, templates, scope, team, phases] = await Promise.all([
+  const [clients, projects, releases, checklist, tickets, comments, audit, members, attachments, templates, scope, team, phases, checkTemplates] = await Promise.all([
     db.prepare("SELECT * FROM clients ORDER BY created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM projects ORDER BY created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM releases ORDER BY due_date ASC").all<Record<string, unknown>>(),
@@ -390,12 +394,15 @@ export async function getWorkspace(actor: Actor) {
     db.prepare("SELECT * FROM scope_versions ORDER BY project_id ASC, version ASC").all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] })),
     db.prepare("SELECT * FROM project_members ORDER BY created_at ASC").all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] })),
     db.prepare("SELECT * FROM project_phases ORDER BY project_id ASC, sort ASC, start_date ASC").all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] })),
+    actor.isStaff
+      ? db.prepare("SELECT * FROM checklist_templates ORDER BY created_at ASC").all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] }))
+      : Promise.resolve({ results: [] as Record<string, unknown>[] }),
   ]);
 
   if (actor.isStaff) {
     const teamRows = team.results as { project_id: string; member_id: string }[];
     if (actor.role === "agency_admin") {
-      return { clients: clients.results, projects: projects.results, releases: releases.results, checklist: checklist.results, tickets: tickets.results, comments: comments.results, audit: audit.results, members: members.results, attachments: attachments.results, templates: templates.results, scope: scope.results, projectTeam: team.results, phases: phases.results, directory: [] as Record<string, unknown>[] };
+      return { clients: clients.results, projects: projects.results, releases: releases.results, checklist: checklist.results, tickets: tickets.results, comments: comments.results, audit: audit.results, members: members.results, attachments: attachments.results, templates: templates.results, scope: scope.results, projectTeam: team.results, phases: phases.results, checklistTemplates: checkTemplates.results, directory: [] as Record<string, unknown>[] };
     }
     // Project managers and developers get full detail only for projects whose
     // team they are on. Projects with no team assigned stay open to everyone.
@@ -430,6 +437,7 @@ export async function getWorkspace(actor: Actor) {
       scope: scope.results.filter((version) => accessibleIds.has(version.project_id)),
       projectTeam: team.results.filter((row) => accessibleIds.has(row.project_id)),
       phases: phases.results.filter((phase) => accessibleIds.has(phase.project_id)),
+      checklistTemplates: checkTemplates.results,
       directory,
     };
   }
@@ -461,6 +469,7 @@ export async function getWorkspace(actor: Actor) {
     scope: scope.results.filter((version) => projectIds.has(version.project_id)),
     projectTeam: [] as Record<string, unknown>[],
     phases: phases.results.filter((phase) => projectIds.has(phase.project_id)),
+    checklistTemplates: [] as Record<string, unknown>[],
     directory: [] as Record<string, unknown>[],
   };
 }
@@ -757,6 +766,63 @@ export async function createRelease(input: Record<string, string> & { checklist?
   }
   await audit(db, "release", releaseId, "Release created", actor, name);
   return releaseId;
+}
+
+export async function updateRelease(input: Record<string, string>, actor: Actor) {
+  requireRole(actor, ["agency_admin", "project_manager"], "Only administrators and project managers can edit releases");
+  const db = await ensureDatabase();
+  const releaseId = required(input, "releaseId", "Release", 100);
+  const release = await db.prepare("SELECT * FROM releases WHERE id = ?").bind(releaseId).first<Record<string, string>>();
+  if (!release) throw new AccessError("Release not found", 404);
+  await assertProjectAccess(db, actor, String(release.project_id));
+  if (release.status === "Approved") throw new AccessError("This release is approved — it is locked as evidence", 400);
+  const name = required(input, "name", "Release name", 160);
+  const version = required(input, "version", "Version", 40);
+  const build = required(input, "build", "Build", 80);
+  const startDate = required(input, "startDate", "Start date", 10);
+  const dueDate = required(input, "dueDate", "Due date", 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(dueDate) || dueDate < startDate) {
+    throw new AccessError("Choose a valid testing window", 400);
+  }
+  const testingNotes = optional(input, "testingNotes", 3000);
+  await enforceRateLimit(actor, "release:update", 60, 60);
+  await db.prepare("UPDATE releases SET name = ?, version = ?, build = ?, start_date = ?, due_date = ?, testing_notes = ? WHERE id = ?")
+    .bind(name, version, build, startDate, dueDate, testingNotes, releaseId).run();
+  const changes: string[] = [];
+  if (release.name !== name) changes.push(`name to “${name}”`);
+  if (release.version !== version) changes.push(`version to ${version}`);
+  if (release.build !== build) changes.push(`build to ${build}`);
+  if (release.start_date !== startDate || release.due_date !== dueDate) changes.push(`window to ${startDate} – ${dueDate}`);
+  if (release.testing_notes !== testingNotes) changes.push("testing instructions");
+  await audit(db, "release", releaseId, "Release updated", actor, changes.length ? `Changed ${changes.join(", ")}` : "No field changes");
+}
+
+export async function createChecklistTemplate(input: Record<string, string> & { checklist?: string[] }, actor: Actor) {
+  requireRole(actor, ["agency_admin", "project_manager"], "Only administrators and project managers can manage checklist templates");
+  const db = await ensureDatabase();
+  const title = required(input, "title", "Template name", 80);
+  const items = (input.checklist || []).map((item) => item.trim()).filter(Boolean);
+  if (!items.length) throw new AccessError("A checklist template needs at least one flow", 400);
+  if (items.length > 50 || items.some((item) => item.length > 180)) throw new AccessError("Use up to 50 flows of 180 characters each", 400);
+  const count = await db.prepare("SELECT COUNT(*) AS count FROM checklist_templates").first<{ count: number }>();
+  if ((count?.count || 0) >= 30) throw new AccessError("Remove an unused checklist template first (limit of 30)", 400);
+  await enforceRateLimit(actor, "template:manage", 60, 60);
+  const templateId = id("cktpl");
+  await db.prepare("INSERT INTO checklist_templates (id,title,items,created_by) VALUES (?,?,?,?)")
+    .bind(templateId, title, items.join("\n"), actor.name).run();
+  await audit(db, "template", templateId, "Checklist template saved", actor, `${title} (${items.length} flows)`);
+  return templateId;
+}
+
+export async function deleteChecklistTemplate(input: Record<string, string>, actor: Actor) {
+  requireRole(actor, ["agency_admin", "project_manager"], "Only administrators and project managers can manage checklist templates");
+  const db = await ensureDatabase();
+  const templateId = required(input, "templateId", "Template", 100);
+  const template = await db.prepare("SELECT title FROM checklist_templates WHERE id = ?").bind(templateId).first<{ title: string }>();
+  if (!template) throw new AccessError("Template not found", 404);
+  await enforceRateLimit(actor, "template:manage", 60, 60);
+  await db.prepare("DELETE FROM checklist_templates WHERE id = ?").bind(templateId).run();
+  await audit(db, "template", templateId, "Checklist template removed", actor, template.title);
 }
 
 export async function addChecklistItems(input: Record<string, string> & { checklist?: string[] }, actor: Actor) {

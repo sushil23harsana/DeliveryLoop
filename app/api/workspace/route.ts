@@ -2,12 +2,14 @@ import {
   addChecklistItems,
   addComment,
   approveRelease,
+  createChecklistTemplate,
   createClient,
   createMember,
   createProject,
   createRelease,
   createReplyTemplate,
   createTicket,
+  deleteChecklistTemplate,
   deleteReplyTemplate,
   editTicket,
   getWorkspace,
@@ -19,6 +21,7 @@ import {
   updateChecklist,
   updateMember,
   updateProjectTeam,
+  updateRelease,
   updateTicket,
   withdrawTicket,
 } from "../../../db/workspace";
@@ -46,6 +49,9 @@ export async function POST(request: Request) {
       case "createProject": result = await createProject(payload, actor); break;
       case "updateProjectTeam": result = await updateProjectTeam(payload, actor); break;
       case "createRelease": result = await createRelease(payload, actor); break;
+      case "updateRelease": result = await updateRelease(payload, actor); break;
+      case "createChecklistTemplate": result = await createChecklistTemplate(payload, actor); break;
+      case "deleteChecklistTemplate": result = await deleteChecklistTemplate(payload, actor); break;
       case "createTicket": result = await createTicket(payload, actor); break;
       case "updateTicket": result = await updateTicket(payload, actor); break;
       case "editTicket": result = await editTicket(payload, actor); break;

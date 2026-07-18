@@ -177,6 +177,14 @@ export const replyTemplates = sqliteTable("reply_templates", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
+export const checklistTemplates = sqliteTable("checklist_templates", {
+  id: text("id").primaryKey(),
+  title: text("title").notNull(),
+  items: text("items").notNull(),
+  createdBy: text("created_by").notNull().default(""),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
 export const projectMembers = sqliteTable("project_members", {
   id: text("id").primaryKey(),
   projectId: text("project_id").notNull(),

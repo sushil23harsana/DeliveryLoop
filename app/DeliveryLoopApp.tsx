@@ -61,14 +61,15 @@ type Comment = { id: string; ticket_id: string; author: string; body: string; vi
 type Attachment = { id: string; ticket_id: string; comment_id: string | null; key: string; uploaded_by: string; created_at: string };
 type AuditEvent = { id: string; entity_type: string; entity_id: string; action: string; actor: string; details: string; created_at: string };
 type ReplyTemplate = { id: string; title: string; body: string; created_by: string; created_at: string };
+type ChecklistTemplate = { id: string; title: string; items: string; created_by: string; created_at: string };
 type ScopeVersion = { id: string; project_id: string; version: number; body: string; change_note: string; author: string; author_role: string; created_at: string };
 type ProjectTeamRow = { id: string; project_id: string; member_id: string; added_by: string; created_at: string };
 type ProjectPhase = { id: string; project_id: string; name: string; start_date: string; end_date: string; status: string; baseline_start: string; baseline_end: string; sort: number; created_at: string };
 type DirectoryProject = { id: string; client_id: string; name: string; code: string; stage: string; manager: string; team: string[] };
 type Actor = { id: string; email: string; name: string; role: string; clientId: string | null; isStaff: boolean };
-type Workspace = { clients: Client[]; members: Member[]; projects: Project[]; releases: Release[]; checklist: ChecklistItem[]; tickets: Ticket[]; comments: Comment[]; audit: AuditEvent[]; attachments: Attachment[]; templates: ReplyTemplate[]; scope: ScopeVersion[]; projectTeam: ProjectTeamRow[]; phases: ProjectPhase[]; directory: DirectoryProject[] };
+type Workspace = { clients: Client[]; members: Member[]; projects: Project[]; releases: Release[]; checklist: ChecklistItem[]; tickets: Ticket[]; comments: Comment[]; audit: AuditEvent[]; attachments: Attachment[]; templates: ReplyTemplate[]; scope: ScopeVersion[]; projectTeam: ProjectTeamRow[]; phases: ProjectPhase[]; checklistTemplates: ChecklistTemplate[]; directory: DirectoryProject[] };
 type View = "overview" | "projects" | "timeline" | "releases" | "feedback" | "clients" | "reports" | "settings";
-type Modal = "feedback" | "project" | "release" | "client" | "member" | null;
+type Modal = "feedback" | "project" | "release" | "editRelease" | "client" | "member" | null;
 type ActionPayload = Record<string, string | string[]>;
 type ReportPrefill = { pageUrl?: string; viewport?: string };
 type RunAction = (action: string, payload: ActionPayload, success: string, optimistic?: (workspace: Workspace) => Workspace) => Promise<boolean>;
@@ -186,8 +187,43 @@ function scopeWorkspace(data: Workspace, clientId: string | null): Workspace {
     scope: data.scope.filter((version) => projectIds.has(version.project_id)),
     projectTeam: [],
     phases: data.phases.filter((phase) => projectIds.has(phase.project_id)),
+    checklistTemplates: [],
     directory: [],
   };
+}
+
+function splitCsvLine(line: string): string[] {
+  const cells: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (const char of line) {
+    if (char === '"') quoted = !quoted;
+    else if (char === "," && !quoted) { cells.push(current); current = ""; }
+    else current += char;
+  }
+  cells.push(current);
+  return cells;
+}
+
+// Converts rows pasted from a spreadsheet (or an uploaded CSV) into the scope
+// format: each row becomes a "- " deliverable bullet, cells joined with a dash,
+// while recognised section headings are kept as-is.
+function sheetToScope(text: string): string {
+  const headingPattern = /^(deliverables|in scope|out of scope|scope|features|requirements|phase|milestones?|timeline|notes?)\b/i;
+  const hasTabs = text.includes("\t");
+  const out: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) { out.push(""); continue; }
+    if (/^(?:[-*•]|\d+[.)])\s+/.test(line)) { out.push(line); continue; }
+    if (headingPattern.test(line) && !line.includes("\t")) { out.push(line); continue; }
+    const cells = (hasTabs ? line.split("\t") : splitCsvLine(line)).map((cell) => cell.trim().replace(/^"|"$/g, "")).filter(Boolean);
+    if (!cells.length) continue;
+    out.push(`- ${cells.join(" — ")}`);
+  }
+  let result = out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (result && !/^(deliverables|scope|in scope)/im.test(result)) result = `Deliverables\n${result}`;
+  return result;
 }
 
 // Turns the agreed scope of work into draft acceptance-checklist flows: every
@@ -348,12 +384,22 @@ export function DeliveryLoopApp() {
     if (optimistic) setWorkspace((current) => current ? optimistic(current) : current);
     try {
       const response = await fetch("/api/workspace", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, payload }) });
-      const body = await response.json() as { error?: string };
+      const body = await response.json() as { error?: string; result?: unknown };
       if (!response.ok) throw new Error(body.error || "Action failed");
       await load();
       setModal(null);
       setPrefill(null);
       notify(success);
+      // Guided setup: creating a project leads straight into recording the
+      // scope, and saving the first scope version leads into the timeline plan.
+      if (actor?.isStaff) {
+        if (action === "createProject" && typeof body.result === "string") {
+          setScopeProjectId(body.result);
+        } else if (action === "saveScope" && typeof payload.projectId === "string" && (body.result as { version?: number } | null)?.version === 1) {
+          setScopeProjectId(null);
+          setPhaseProjectId(payload.projectId);
+        }
+      }
       return true;
     } catch (error) {
       if (optimistic) await load().catch(() => undefined);
@@ -495,11 +541,11 @@ export function DeliveryLoopApp() {
         </header>
 
         {view === "overview" && !isClientView ? (
-          <Overview data={data} openTickets={openTickets} blockers={blockers} retest={retest} testingReleases={testingReleases} setView={setView} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} setSelectedTicketId={setSelectedTicketId} setModal={setModal} />
+          <Overview data={data} openTickets={openTickets} blockers={blockers} retest={retest} testingReleases={testingReleases} setView={setView} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} setSelectedTicketId={setSelectedTicketId} setModal={setModal} setScopeProjectId={setScopeProjectId} setPhaseProjectId={setPhaseProjectId} />
         ) : null}
         {view === "projects" ? <Projects data={data} isClientView={isClientView} canManageDelivery={canManageDelivery && !isClientView} clientById={clientById} setView={setView} setSelectedReleaseId={setSelectedReleaseId} setScopeProjectId={setScopeProjectId} setTeamProjectId={setTeamProjectId} notify={notify} /> : null}
         {view === "timeline" ? <TimelineView data={data} canManageDelivery={canManageDelivery && !isClientView} isClientView={isClientView} clientById={clientById} setPhaseProjectId={setPhaseProjectId} /> : null}
-        {view === "releases" ? <Releases data={data} actor={actor} isClientView={isClientView} selectedRelease={selectedRelease} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} runAction={runAction} busy={busy} setPrintReleaseId={setPrintReleaseId} /> : null}
+        {view === "releases" ? <Releases data={data} actor={actor} isClientView={isClientView} selectedRelease={selectedRelease} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} runAction={runAction} busy={busy} setPrintReleaseId={setPrintReleaseId} setModal={setModal} /> : null}
         {view === "feedback" ? <Feedback data={data} tickets={visibleTickets} query={query} setQuery={setQuery} statusFilter={statusFilter} setStatusFilter={setStatusFilter} setSelectedTicketId={setSelectedTicketId} boardMode={boardMode} setBoardMode={setBoardMode} myWork={myWork} setMyWork={setMyWork} unreadIds={unreadIds} visibleCount={visibleCount} setVisibleCount={setVisibleCount} isStaff={actor.isStaff && !previewClientId} runAction={runAction} /> : null}
         {view === "clients" && (!isClientView || canManageClientMembers) ? <Clients data={data} actor={actor} openMemberModal={openMemberModal} runAction={runAction} busy={busy} notify={notify} /> : null}
         {view === "reports" && !isClientView ? <Reports data={data} /> : null}
@@ -542,18 +588,21 @@ function AccessScreen({ error }: { error: { status: number; message: string } })
   return <AuthScreen status={error.status} message={error.message} />;
 }
 
-function Overview({ data, openTickets, blockers, retest, testingReleases, setView, setSelectedReleaseId, projectById, clientById, setSelectedTicketId, setModal }: { data: Workspace; openTickets: Ticket[]; blockers: Ticket[]; retest: Ticket[]; testingReleases: Release[]; setView: (view: View) => void; setSelectedReleaseId: (id: string) => void; projectById: (id: string) => Project | undefined; clientById: (id: string) => Client | undefined; setSelectedTicketId: (id: string) => void; setModal: (modal: Modal) => void }) {
+function Overview({ data, openTickets, blockers, retest, testingReleases, setView, setSelectedReleaseId, projectById, clientById, setSelectedTicketId, setModal, setScopeProjectId, setPhaseProjectId }: { data: Workspace; openTickets: Ticket[]; blockers: Ticket[]; retest: Ticket[]; testingReleases: Release[]; setView: (view: View) => void; setSelectedReleaseId: (id: string) => void; projectById: (id: string) => Project | undefined; clientById: (id: string) => Client | undefined; setSelectedTicketId: (id: string) => void; setModal: (modal: Modal) => void; setScopeProjectId: (id: string) => void; setPhaseProjectId: (id: string) => void }) {
   const verified = data.tickets.filter((ticket) => closedStatuses.has(ticket.status)).length;
   if (!data.releases.length) {
+    const newestProject = data.projects[0];
     return <div className="page-content overview-page">
       <section className="onboarding surface">
-        <header><p>Welcome to DeliveryLoop</p><h2>Set up your first client delivery loop</h2><small>Three quick steps and you can hand a release to a client for structured testing and sign-off.</small></header>
+        <header><p>Welcome to DeliveryLoop</p><h2>Set up your first client delivery loop</h2><small>One continuous path — from the client workspace to the agreed scope, the timeline and the first release your client tests and signs off.</small></header>
         <div className="onboarding-steps">
-          <button onClick={() => setModal("client")}><span className={data.clients.length ? "step-num done" : "step-num"}>{data.clients.length ? <Check size={14} /> : "1"}</span><b>Create a client workspace</b><small>The company whose delivery you are running. Their testers will only ever see their own work.</small></button>
-          <button disabled={!data.clients.length} onClick={() => setModal("project")}><span className={data.projects.length ? "step-num done" : "step-num"}>{data.projects.length ? <Check size={14} /> : "2"}</span><b>Add a project</b><small>What you are building for them — it gets a code like ACM that numbers every feedback ticket.</small></button>
-          <button disabled={!data.projects.length} onClick={() => setModal("release")}><span className="step-num">3</span><b>Prepare a release</b><small>A build for the client to test, with the acceptance checklist they should work through.</small></button>
+          <button onClick={() => setModal("client")}><span className={data.clients.length ? "step-num done" : "step-num"}>{data.clients.length ? <Check size={14} /> : "1"}</span><b>Create a client workspace</b><small>The company whose delivery you are running. Their testers only ever see their own work.</small></button>
+          <button disabled={!data.clients.length} onClick={() => setModal("project")}><span className={data.projects.length ? "step-num done" : "step-num"}>{data.projects.length ? <Check size={14} /> : "2"}</span><b>Add a project</b><small>What you are building — its code (like ACM) numbers every feedback ticket.</small></button>
+          <button disabled={!newestProject} onClick={() => newestProject && setScopeProjectId(newestProject.id)}><span className={data.scope.length ? "step-num done" : "step-num"}>{data.scope.length ? <Check size={14} /> : "3"}</span><b>Record the agreed scope</b><small>Paste it from your SOW sheet — every later revision is versioned and comparable.</small></button>
+          <button disabled={!newestProject} onClick={() => newestProject && setPhaseProjectId(newestProject.id)}><span className={data.phases.length ? "step-num done" : "step-num"}>{data.phases.length ? <Check size={14} /> : "4"}</span><b>Plan the timeline</b><small>Phases on a Gantt — slippage against the agreed dates shows automatically.</small></button>
+          <button disabled={!newestProject} onClick={() => setModal("release")}><span className="step-num">5</span><b>Prepare a release</b><small>The UAT checklist generates itself from the scope — clients test and sign off here.</small></button>
         </div>
-        <p className="onboarding-hint"><ShieldCheck size={16} /> After that, invite the client&apos;s testers under Clients &amp; access — they report feedback, you fix, they verify, and finally sign the release off.</p>
+        <p className="onboarding-hint"><ShieldCheck size={16} /> Then invite the client&apos;s testers under Clients &amp; access — they report feedback, you fix, they verify, and finally sign the release off.</p>
       </section>
     </div>;
   }
@@ -824,7 +873,7 @@ function PhaseModal({ project, phases, close, runAction, busy }: { project: Proj
   </div>;
 }
 
-function Releases({ data, actor, isClientView, selectedRelease, setSelectedReleaseId, projectById, clientById, runAction, busy, setPrintReleaseId }: { data: Workspace; actor: Actor; isClientView: boolean; selectedRelease?: Release; setSelectedReleaseId: (id: string) => void; projectById: (id: string) => Project | undefined; clientById: (id: string) => Client | undefined; runAction: RunAction; busy: boolean; setPrintReleaseId: (id: string | null) => void }) {
+function Releases({ data, actor, isClientView, selectedRelease, setSelectedReleaseId, projectById, clientById, runAction, busy, setPrintReleaseId, setModal }: { data: Workspace; actor: Actor; isClientView: boolean; selectedRelease?: Release; setSelectedReleaseId: (id: string) => void; projectById: (id: string) => Project | undefined; clientById: (id: string) => Client | undefined; runAction: RunAction; busy: boolean; setPrintReleaseId: (id: string | null) => void; setModal: (modal: Modal) => void }) {
   const [exceptions, setExceptions] = useState("");
   const [newCheck, setNewCheck] = useState("");
   if (!selectedRelease) return <div className="page-content"><EmptyState icon={PackageCheck} title="No releases yet" body={isClientView ? "Your delivery team has not opened a release for testing yet. You will be notified when one is ready." : "Create the first release to begin client UAT."} /></div>;
@@ -859,7 +908,7 @@ function Releases({ data, actor, isClientView, selectedRelease, setSelectedRelea
   return <div className="page-content release-page">
     <aside className="release-index"><p>Release history</p>{data.releases.map((release) => <button key={release.id} className={release.id === selectedRelease.id ? "active" : ""} onClick={() => setSelectedReleaseId(release.id)}><span className={`release-dot ${release.status.toLowerCase()}`} /><span><b>{release.version}</b><small>{release.name}</small></span><time>{formatDate(release.due_date)}</time></button>)}</aside>
     <section className="release-content">
-      <article className="release-summary surface"><div className="release-summary-top"><div className="release-title"><span style={{ background: client?.accent }}>{initials(client?.name || "CL")}</span><div><p>{client?.name} / {project?.name}</p><h2>{selectedRelease.name}</h2><small>{selectedRelease.version} · {selectedRelease.build}</small></div></div><span className="release-summary-actions"><button className="quiet-button" onClick={() => setPrintReleaseId(selectedRelease.id)}><Printer size={15} /> Acceptance report</button><StatusBadge value={selectedRelease.status} /></span></div><p className="release-brief">{selectedRelease.testing_notes}</p><dl><div><CalendarDays size={16} /><span><dt>Testing window</dt><dd>{formatDate(selectedRelease.start_date)} – {formatDate(selectedRelease.due_date, true)}</dd></span></div><div><Inbox size={16} /><span><dt>Feedback</dt><dd>{open.length} open / {releaseTickets.length} total</dd></span></div><div><AlertTriangle size={16} /><span><dt>Blocking</dt><dd className={blockers.length ? "danger-text" : "success-text"}>{blockers.length || "Clear"}</dd></span></div></dl></article>
+      <article className="release-summary surface"><div className="release-summary-top"><div className="release-title"><span style={{ background: client?.accent }}>{initials(client?.name || "CL")}</span><div><p>{client?.name} / {project?.name}</p><h2>{selectedRelease.name}</h2><small>{selectedRelease.version} · {selectedRelease.build}</small></div></div><span className="release-summary-actions">{canManageChecklist && selectedRelease.status !== "Approved" ? <button className="quiet-button" onClick={() => setModal("editRelease")}><Pencil size={14} /> Edit</button> : null}<button className="quiet-button" onClick={() => setPrintReleaseId(selectedRelease.id)}><Printer size={15} /> Acceptance report</button><StatusBadge value={selectedRelease.status} /></span></div><p className="release-brief">{selectedRelease.testing_notes}</p><dl><div><CalendarDays size={16} /><span><dt>Testing window</dt><dd>{formatDate(selectedRelease.start_date)} – {formatDate(selectedRelease.due_date, true)}</dd></span></div><div><Inbox size={16} /><span><dt>Feedback</dt><dd>{open.length} open / {releaseTickets.length} total</dd></span></div><div><AlertTriangle size={16} /><span><dt>Blocking</dt><dd className={blockers.length ? "danger-text" : "success-text"}>{blockers.length || "Clear"}</dd></span></div></dl></article>
       <div className="release-workspace">
         <article className="surface checklist-panel"><header className="section-header"><div><p>Acceptance scope</p><h2>UAT checklist</h2></div><span className="fraction">{passedCount}/{checks.length} passed</span></header><div className="checklist-meter"><i style={{ width: `${checkPercent}%` }} /></div><div className="checklist-list">{checks.map((item) => <div key={item.id}><span className="check-title">{item.title}</span>{["Not tested", "Passed", "Failed"].map((state) => <button key={state} className={`check-chip ${item.state === state ? `on ${state === "Not tested" ? "none" : state.toLowerCase()}` : ""}`} disabled={busy || checklistLocked || !canTest} onClick={() => setCheck(item, state)}>{state}</button>)}{canManageChecklist && !checklistLocked && item.state === "Not tested" ? <button className="check-remove" title="Remove this flow" aria-label={`Remove ${item.title}`} disabled={busy} onClick={() => runAction("removeChecklistItem", { itemId: item.id }, "Checklist item removed")}><Trash2 size={13} /></button> : null}</div>)}{!checks.length ? <div className="member-empty"><FileText size={18} /><span><b>No acceptance flows yet</b><small>{canManageChecklist ? "Add the flows the client should test below, or generate them from the scope when creating the next release." : "The delivery team has not added acceptance flows yet."}</small></span></div> : null}</div>{canManageChecklist && !checklistLocked ? <form className="check-add" onSubmit={addCheckItem}><input value={newCheck} maxLength={180} onChange={(event) => setNewCheck(event.target.value)} placeholder="Add an acceptance flow, e.g. Guest checkout with a saved card" /><button className="secondary-button" disabled={busy || !newCheck.trim()}>Add flow</button></form> : null}</article>
         <article className="surface approval-panel"><header className="section-header"><div><p>Delivery gate</p><h2>{selectedRelease.status === "Approved" ? "Release accepted" : "Client sign-off"}</h2></div><ShieldCheck size={18} /></header>{selectedRelease.status === "Approved" ? <div className="approved-state"><CheckCircle2 size={28} /><h3>Accepted by {selectedRelease.approved_by}</h3><p>{formatDate(selectedRelease.approved_at || "", true)}</p>{approvalEvent?.details && approvalEvent.details !== "No exceptions" ? <span className="approved-exceptions"><b>Recorded exceptions</b>{approvalEvent.details}</span> : null}<small>The immutable audit event has been recorded.</small></div> : <><div className="gate-list"><GateRow passed={!blockers.length} title="No open blockers" detail={blockers.length ? `${blockers.length} high-impact items remain` : "Requirement met"} /><GateRow passed={!incomplete.length} title="Checklist complete" detail={incomplete.length ? `${incomplete.length} checks are not passed` : "Requirement met"} /><GateRow passed={canSign} title="Authorised approver" detail={canSign ? roleLabel(actor.role) : "Client admin approval required"} /></div>{canApprove && canSign ? <label className="exceptions-field">Exceptions to record (optional)<textarea value={exceptions} maxLength={1000} onChange={(event) => setExceptions(event.target.value)} placeholder="Agreed items that ship despite being open, e.g. deferred content fixes" /></label> : null}<button className="primary-button full" disabled={!canApprove || !canSign || busy} onClick={() => runAction("approveRelease", { releaseId: selectedRelease.id, exceptions: exceptions.trim() }, "Release approved and recorded")}>{canApprove && canSign ? "Approve release" : "Complete the gates above"}</button><p className="approval-note">Approval captures the release build, approver, timestamp and any recorded exceptions.</p></>}</article>
@@ -1028,7 +1077,22 @@ function Settings({ data, actor, openMemberModal, runAction, busy, notify }: { d
       <aside className="surface readiness-card"><header><p>Access readiness</p><h2>Client onboarding</h2></header><div className="readiness-number">{activeClientMembers}<span>active client members</span></div><div className="readiness-list"><div><CheckCircle2 size={15} /><span><b>Owner identity secured</b><small>{actor.email}</small></span></div><div><CheckCircle2 size={15} /><span><b>{data.clients.length} client workspaces isolated</b><small>API and attachment access checked server-side</small></span></div><div className={clientAdmins.size === data.clients.length ? "" : "pending"}><AlertCircle size={15} /><span><b>{clientAdmins.size} of {data.clients.length} clients have an admin</b><small>Add one client admin before handing over each portal.</small></span></div></div></aside>
     </section>
     <TemplatePanel templates={data.templates || []} runAction={runAction} busy={busy} />
+    <ChecklistTemplatePanel templates={data.checklistTemplates || []} runAction={runAction} busy={busy} />
   </div>;
+}
+
+function ChecklistTemplatePanel({ templates, runAction, busy }: { templates: ChecklistTemplate[]; runAction: (action: string, payload: ActionPayload, success: string) => Promise<boolean>; busy: boolean }) {
+  return <article className="surface template-panel">
+    <header className="section-header"><div><p>Reusable UAT</p><h2>Checklist templates</h2></div></header>
+    <p className="template-hint">Save any acceptance checklist as a template from the “Prepare release” screen — then insert it into future releases in one click.</p>
+    <div className="template-list">
+      {templates.map((template) => {
+        const flows = template.items.split("\n").filter(Boolean);
+        return <div key={template.id} className="template-row"><div><b>{template.title}</b><small>{flows.length} flow{flows.length === 1 ? "" : "s"} · {flows.slice(0, 3).join(" · ")}{flows.length > 3 ? " …" : ""}</small></div><button aria-label={`Delete checklist template ${template.title}`} title="Delete template" disabled={busy} onClick={() => runAction("deleteChecklistTemplate", { templateId: template.id }, "Checklist template removed")}><Trash2 size={14} /></button></div>;
+      })}
+      {!templates.length ? <div className="member-empty"><PackageCheck size={18} /><span><b>No checklist templates yet</b><small>Build a checklist once on a release, save it as a template, reuse it everywhere.</small></span></div> : null}
+    </div>
+  </article>;
 }
 
 function TemplatePanel({ templates, runAction, busy }: { templates: ReplyTemplate[]; runAction: (action: string, payload: ActionPayload, success: string) => Promise<boolean>; busy: boolean }) {
@@ -1370,7 +1434,14 @@ function ScopePanel({ project, versions, canEdit, isClientView, close, runAction
         </> : <div className="empty-state"><FileText size={24} /><h3>No scope recorded yet</h3><p>{canEdit ? "Record what was initially agreed so every later revision is tracked with its author and version." : "The agreed scope of work has not been recorded for this project yet."}</p>{canEdit ? <button className="primary-button" onClick={() => startEdit("")}>Record the agreed scope</button> : null}</div>) : null}
 
         {mode === "edit" ? <div className="scope-editor">
-          <label>Scope of work<textarea value={draft} maxLength={20000} onChange={(event) => setDraft(event.target.value)} placeholder={"Deliverables\n- What will be built\n\nOut of scope\n- What is explicitly excluded"} /></label>
+          <label>Scope of work<textarea value={draft} maxLength={20000} onChange={(event) => setDraft(event.target.value)} placeholder={"Deliverables\n- What will be built\n\nOut of scope\n- What is explicitly excluded\n\nTip: paste rows straight from your SOW sheet and press “Format as deliverables”"} /></label>
+          <div className="field-actions">
+            <label className="quiet-button sheet-upload"><UploadCloud size={13} /> Upload sheet (.csv)
+              <input type="file" accept=".csv,.tsv,.txt" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => { const formatted = sheetToScope(String(reader.result || "")); if (formatted) setDraft((current) => current.trim() ? `${current.trim()}\n\n${formatted}` : formatted); }; reader.readAsText(file); event.target.value = ""; }} />
+            </label>
+            <button type="button" className="quiet-button" disabled={!draft.trim()} onClick={() => setDraft(sheetToScope(draft))}><Type size={13} /> Format as deliverables</button>
+            <em>Copy rows from your Google Sheet SOW and paste them above — formatting turns each row into a deliverable bullet that can later generate the UAT checklist.</em>
+          </div>
           {ordered.length ? <label>What changed in this revision?<input value={note} maxLength={300} onChange={(event) => setNote(event.target.value)} placeholder="e.g. Added the coupon engine agreed on the review call" /></label> : null}
           <p className="scope-editor-hint"><ShieldCheck size={14} /> Saving creates a new version. Earlier versions are never changed or deleted.</p>
           <footer><button type="button" className="quiet-button" onClick={() => { setMode("current"); }}>Cancel</button><button className="primary-button" disabled={busy || !draft.trim() || (ordered.length > 0 && !note.trim())} onClick={() => void save()}>{busy ? "Saving…" : ordered.length ? `Save as v${(latest?.version || 0) + 1}` : "Save initial scope (v1)"}</button></footer>
@@ -1431,6 +1502,26 @@ function ActionModal({ modal, data, isClientView, selectedRelease, memberClientI
     setChecklistText(items.map((item) => `Verify: ${item}`).join("\n"));
     notify(`${items.length} acceptance flows drafted from scope v${latest.version} — edit freely before saving`);
   }
+  function insertChecklistTemplate(templateId: string) {
+    const template = (data.checklistTemplates || []).find((item) => item.id === templateId);
+    if (!template) return;
+    setChecklistText((current) => [current.trim(), template.items].filter(Boolean).join("\n"));
+    notify(`Inserted “${template.title}”`);
+  }
+  async function saveChecklistTemplate() {
+    const items = checklistText.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (!items.length) { notify("Write or generate the checklist first, then save it as a template"); return; }
+    const title = window.prompt("Name this checklist template, e.g. Standard web app UAT");
+    if (!title?.trim()) return;
+    try {
+      const response = await fetch("/api/workspace", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "createChecklistTemplate", payload: { title: title.trim(), checklist: items } }) });
+      const body = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(body.error || "Could not save the template");
+      notify(`Template “${title.trim()}” saved for future releases`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Could not save the template");
+    }
+  }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = new FormData(event.currentTarget);
     try {
@@ -1438,6 +1529,7 @@ function ActionModal({ modal, data, isClientView, selectedRelease, memberClientI
       if (modal === "member") return runAction("createMember", { clientId: isAgencyMember ? "" : memberClientId || field(form, "clientId"), name: field(form, "name"), email: field(form, "email"), role: field(form, "role") }, "Member access created");
       if (modal === "project") return runAction("createProject", { clientId: field(form, "clientId"), name: field(form, "name"), code: field(form, "code"), description: field(form, "description"), manager: field(form, "manager"), stage: "UAT", stagingUrl: field(form, "stagingUrl") }, "Project created");
       if (modal === "release") return runAction("createRelease", { projectId: field(form, "projectId"), name: field(form, "name"), version: field(form, "version"), build: field(form, "build"), startDate: field(form, "startDate"), dueDate: field(form, "dueDate"), testingNotes: field(form, "testingNotes"), checklist: field(form, "checklist").split("\n").filter(Boolean) }, "Release prepared");
+      if (modal === "editRelease") return runAction("updateRelease", { releaseId: selectedRelease?.id || "", name: field(form, "name"), version: field(form, "version"), build: field(form, "build"), startDate: field(form, "startDate"), dueDate: field(form, "dueDate"), testingNotes: field(form, "testingNotes") }, "Release updated");
       const files = form.getAll("screenshot").filter((entry): entry is File => entry instanceof File && entry.size > 0).slice(0, 3);
       const attachmentKeys: string[] = [];
       for (const file of files) {
@@ -1454,13 +1546,14 @@ function ActionModal({ modal, data, isClientView, selectedRelease, memberClientI
       notify(error instanceof Error ? error.message : "Unable to save");
     }
   }
-  const title = modal === "member" && isAgencyMember ? "Add internal teammate" : ({ feedback: "Report feedback", project: "Create project", release: "Prepare release", client: "Create client workspace", member: "Invite workspace member" } as Record<Exclude<Modal, null>, string>)[modal];
+  const title = modal === "member" && isAgencyMember ? "Add internal teammate" : ({ feedback: "Report feedback", project: "Create project", release: "Prepare release", editRelease: "Edit release", client: "Create client workspace", member: "Invite workspace member" } as Record<Exclude<Modal, null>, string>)[modal];
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}><section className="modal-card" role="dialog" aria-modal="true" aria-label={title}><header><div><p>DeliveryLoop</p><h2>{title}</h2></div><button onClick={close} aria-label="Close"><X size={19} /></button></header><form onSubmit={submit}>
     {modal === "feedback" ? <><label className="span-2">Release<select name="releaseId" defaultValue={selectedRelease?.id || data.releases[0]?.id}>{data.releases.map((release) => <option key={release.id} value={release.id}>{data.projects.find((project) => project.id === release.project_id)?.name} · {release.version}</option>)}</select></label><label>Feedback type<select name="type" defaultValue="Bug"><option>Bug</option><option>Change request</option><option>Content</option><option>Question</option></select></label><label>Severity<select name="severity" defaultValue="Medium"><option>Critical</option><option>High</option><option>Medium</option><option>Low</option></select></label><label className="span-2">Short title<input name="title" placeholder="Describe the issue clearly" required /></label><label className="span-2">What happened?<textarea name="actual" placeholder="What did you see and how did you get here?" required /></label><label className="span-2">What did you expect?<textarea name="expected" placeholder="Describe the expected result" required /></label><label className="span-2">Page or screen<input name="pageUrl" defaultValue={prefill?.pageUrl || ""} placeholder="/checkout/payment or a staging URL" /></label><label className="span-2 upload-field"><UploadCloud size={18} /><span><b>Attach screenshots</b><small>Up to 3 images · PNG, JPG, WebP or GIF, 8 MB each</small></span><input name="screenshot" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" /></label>{prefill?.pageUrl ? <div className="modal-callout span-2"><MonitorSmartphone size={16} /><span>Captured from the staging page{prefill.viewport ? ` at ${prefill.viewport}` : ""}. Check the details and submit.</span></div> : null}</> : null}
     {modal === "client" ? <><label className="span-2">Company name<input name="name" required placeholder="Acme Limited" /></label><label>Primary contact<input name="contactName" required placeholder="Contact name" /></label><label>Email<input name="contactEmail" type="email" required placeholder="client@company.com" /></label><label className="span-2">Workspace colour<input name="accent" type="color" defaultValue="#3157D5" /></label></> : null}
     {modal === "member" ? <><div className="modal-callout span-2"><ShieldCheck size={17} /><span>An activation email is sent to this exact address. Registration is invitation-only.</span></div>{!isAgencyMember ? <label className="span-2">Client<select name="clientId" defaultValue={memberClientId || ""} disabled={Boolean(memberClientId)}>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</select></label> : null}<label>Name<input name="name" required maxLength={120} placeholder="Full name" /></label><label>Email<input name="email" type="email" required maxLength={254} placeholder={isAgencyMember ? "person@agency.com" : "person@client.com"} /></label><label className="span-2">Role<select name="role" defaultValue={isAgencyMember ? "project_manager" : "client_tester"}>{isAgencyMember ? <><option value="agency_admin">Agency admin</option><option value="project_manager">Project manager</option><option value="developer">Developer</option></> : <><option value="client_admin">Client admin</option><option value="client_tester">Client tester</option><option value="client_viewer">Client viewer</option></>}</select></label></> : null}
     {modal === "project" ? <><label className="span-2">Client<select name="clientId">{data.clients.map((client) => <option key={client.id} value={client.id}>{client.name}</option>)}</select></label><label>Project name<input name="name" required placeholder="Customer portal" /></label><label>Project code<input name="code" required maxLength={8} placeholder="CPT" /></label><label className="span-2">Purpose<textarea name="description" required placeholder="What is being delivered?" /></label><label>Project lead<input name="manager" required placeholder="Team member" /></label><label>Staging URL<input name="stagingUrl" type="text" inputMode="url" placeholder="myapp.run.app or https://staging.example.com" /></label></> : null}
-    {modal === "release" ? <><label className="span-2">Project<select name="projectId" value={relProjectId} onChange={(event) => setRelProjectId(event.target.value)}>{data.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="span-2">Release name<input name="name" required placeholder="Checkout and promotions UAT" /></label><label>Version<input name="version" required placeholder="v1.0" /></label><label>Build<input name="build" required placeholder="build-001" /></label><label>Testing starts<input name="startDate" type="date" required /></label><label>Testing due<input name="dueDate" type="date" required /></label><label className="span-2">Testing instructions<textarea name="testingNotes" required placeholder="What should the client focus on?" /></label><label className="span-2">Acceptance checklist — one flow per line<textarea name="checklist" value={checklistText} onChange={(event) => setChecklistText(event.target.value)} placeholder={"Generate it from the agreed scope of work below, type it, or leave empty and add flows later"} /></label><div className="field-actions span-2"><button type="button" className="secondary-button" onClick={generateChecklist}><FileText size={13} /> Generate from scope of work{scopeForProject.length ? <em className="scope-version-chip">v{Math.max(...scopeForProject.map((version) => version.version))}</em> : null}</button><em>Every deliverable in the agreed scope becomes a testable flow. You can also add or remove flows after the release is created.</em></div></> : null}
+    {modal === "release" ? <><label className="span-2">Project<select name="projectId" value={relProjectId} onChange={(event) => setRelProjectId(event.target.value)}>{data.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><label className="span-2">Release name<input name="name" required placeholder="Checkout and promotions UAT" /></label><label>Version<input name="version" required placeholder="v1.0" /></label><label>Build<input name="build" required placeholder="build-001" /></label><label>Testing starts<input name="startDate" type="date" required /></label><label>Testing due<input name="dueDate" type="date" required /></label><label className="span-2">Testing instructions<textarea name="testingNotes" required placeholder="What should the client focus on?" /></label><label className="span-2">Acceptance checklist — one flow per line<textarea name="checklist" value={checklistText} onChange={(event) => setChecklistText(event.target.value)} placeholder={"Generate it from the agreed scope of work below, type it, or leave empty and add flows later"} /></label><div className="field-actions span-2"><button type="button" className="secondary-button" onClick={generateChecklist}><FileText size={13} /> Generate from scope of work{scopeForProject.length ? <em className="scope-version-chip">v{Math.max(...scopeForProject.map((version) => version.version))}</em> : null}</button>{(data.checklistTemplates || []).length ? <select className="template-picker" value="" aria-label="Insert a checklist template" onChange={(event) => insertChecklistTemplate(event.target.value)}><option value="" disabled>Insert template…</option>{data.checklistTemplates.map((template) => <option key={template.id} value={template.id}>{template.title}</option>)}</select> : null}<button type="button" className="quiet-button" onClick={() => void saveChecklistTemplate()}>Save as template</button><em>Every deliverable in the agreed scope becomes a testable flow. You can also add or remove flows after the release is created.</em></div></> : null}
+    {modal === "editRelease" && selectedRelease ? <><label className="span-2">Release name<input name="name" required maxLength={160} defaultValue={selectedRelease.name} /></label><label>Version<input name="version" required maxLength={40} defaultValue={selectedRelease.version} /></label><label>Build<input name="build" required maxLength={80} defaultValue={selectedRelease.build} /></label><label>Testing starts<input name="startDate" type="date" required defaultValue={selectedRelease.start_date} /></label><label>Testing due<input name="dueDate" type="date" required defaultValue={selectedRelease.due_date} /></label><label className="span-2">Testing instructions<textarea name="testingNotes" defaultValue={selectedRelease.testing_notes} /></label><div className="modal-callout span-2"><ShieldCheck size={16} /><span>Changes are recorded in the audit trail. Approved releases cannot be edited — they stay locked as acceptance evidence.</span></div></> : null}
     <footer><button type="button" className="quiet-button" onClick={close}>Cancel</button><button className="primary-button" disabled={busy}>{busy ? "Saving…" : isClientView && modal === "feedback" ? "Submit to delivery team" : "Save"}</button></footer>
   </form></section></div>;
 }
