@@ -185,6 +185,19 @@ export const projectMembers = sqliteTable("project_members", {
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 }, (table) => [uniqueIndex("project_members_project_member_idx").on(table.projectId, table.memberId)]);
 
+export const projectPhases = sqliteTable("project_phases", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  name: text("name").notNull(),
+  startDate: text("start_date").notNull(),
+  endDate: text("end_date").notNull(),
+  status: text("status").notNull().default("Planned"),
+  baselineStart: text("baseline_start").notNull().default(""),
+  baselineEnd: text("baseline_end").notNull().default(""),
+  sort: integer("sort").notNull().default(0),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [index("project_phases_project_idx").on(table.projectId)]);
+
 export const scopeVersions = sqliteTable("scope_versions", {
   id: text("id").primaryKey(),
   projectId: text("project_id").notNull(),

@@ -10,6 +10,7 @@ import {
   Bug,
   Building2,
   CalendarDays,
+  CalendarRange,
   Check,
   CheckCircle2,
   ChevronRight,
@@ -64,10 +65,11 @@ type AuditEvent = { id: string; entity_type: string; entity_id: string; action: 
 type ReplyTemplate = { id: string; title: string; body: string; created_by: string; created_at: string };
 type ScopeVersion = { id: string; project_id: string; version: number; body: string; change_note: string; author: string; author_role: string; created_at: string };
 type ProjectTeamRow = { id: string; project_id: string; member_id: string; added_by: string; created_at: string };
+type ProjectPhase = { id: string; project_id: string; name: string; start_date: string; end_date: string; status: string; baseline_start: string; baseline_end: string; sort: number; created_at: string };
 type DirectoryProject = { id: string; client_id: string; name: string; code: string; stage: string; manager: string; team: string[] };
 type Actor = { id: string; email: string; name: string; role: string; clientId: string | null; isStaff: boolean };
-type Workspace = { clients: Client[]; members: Member[]; projects: Project[]; releases: Release[]; checklist: ChecklistItem[]; tickets: Ticket[]; comments: Comment[]; audit: AuditEvent[]; attachments: Attachment[]; templates: ReplyTemplate[]; scope: ScopeVersion[]; projectTeam: ProjectTeamRow[]; directory: DirectoryProject[] };
-type View = "overview" | "projects" | "releases" | "feedback" | "clients" | "reports" | "settings";
+type Workspace = { clients: Client[]; members: Member[]; projects: Project[]; releases: Release[]; checklist: ChecklistItem[]; tickets: Ticket[]; comments: Comment[]; audit: AuditEvent[]; attachments: Attachment[]; templates: ReplyTemplate[]; scope: ScopeVersion[]; projectTeam: ProjectTeamRow[]; phases: ProjectPhase[]; directory: DirectoryProject[] };
+type View = "overview" | "projects" | "timeline" | "releases" | "feedback" | "clients" | "reports" | "settings";
 type Modal = "feedback" | "project" | "release" | "client" | "member" | null;
 type ActionPayload = Record<string, string | string[]>;
 type ReportPrefill = { pageUrl?: string; viewport?: string };
@@ -86,6 +88,7 @@ const boardColumns: { id: string; label: string; statuses: string[]; dropStatus:
 const staffNavigation = [
   { id: "overview" as View, label: "Overview", icon: LayoutDashboard },
   { id: "projects" as View, label: "Projects", icon: FolderKanban },
+  { id: "timeline" as View, label: "Timeline", icon: CalendarRange },
   { id: "releases" as View, label: "Releases", icon: PackageCheck },
   { id: "feedback" as View, label: "Feedback", icon: MessageSquareWarning },
   { id: "clients" as View, label: "Clients & access", icon: Building2 },
@@ -97,6 +100,7 @@ const clientNavigation = [
   { id: "releases" as View, label: "Current release", icon: PackageCheck },
   { id: "feedback" as View, label: "Feedback", icon: MessageSquareWarning },
   { id: "projects" as View, label: "Project details", icon: FolderKanban },
+  { id: "timeline" as View, label: "Timeline", icon: CalendarRange },
 ];
 
 const clientAdminNavigation = { id: "clients" as View, label: "Team access", icon: Users };
@@ -105,6 +109,21 @@ function formatDate(value: string, includeYear = false) {
   if (!value) return "—";
   const normalized = value.length === 10 ? `${value}T12:00:00` : value;
   return new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", ...(includeYear ? { year: "numeric" } : {}) }).format(new Date(normalized));
+}
+
+const DAY_MS = 86400000;
+
+function dayNumber(date: string) {
+  return Math.round(Date.parse(`${date.slice(0, 10)}T12:00:00Z`) / DAY_MS);
+}
+
+function todayIso() {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+function phaseBehind(phase: ProjectPhase, today: string) {
+  return phase.status !== "Done" && phase.end_date < today;
 }
 
 function daysSince(value: string) {
@@ -156,6 +175,7 @@ function scopeWorkspace(data: Workspace, clientId: string | null): Workspace {
     templates: [],
     scope: data.scope.filter((version) => projectIds.has(version.project_id)),
     projectTeam: [],
+    phases: data.phases.filter((phase) => projectIds.has(phase.project_id)),
     directory: [],
   };
 }
@@ -177,6 +197,7 @@ export function DeliveryLoopApp() {
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
   const [scopeProjectId, setScopeProjectId] = useState<string | null>(null);
   const [teamProjectId, setTeamProjectId] = useState<string | null>(null);
+  const [phaseProjectId, setPhaseProjectId] = useState<string | null>(null);
   const [selectedReleaseId, setSelectedReleaseId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("All statuses");
@@ -444,6 +465,7 @@ export function DeliveryLoopApp() {
           <Overview data={data} openTickets={openTickets} blockers={blockers} retest={retest} testingReleases={testingReleases} setView={setView} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} setSelectedTicketId={setSelectedTicketId} setModal={setModal} />
         ) : null}
         {view === "projects" ? <Projects data={data} isClientView={isClientView} canManageDelivery={canManageDelivery && !isClientView} clientById={clientById} setView={setView} setSelectedReleaseId={setSelectedReleaseId} setScopeProjectId={setScopeProjectId} setTeamProjectId={setTeamProjectId} notify={notify} /> : null}
+        {view === "timeline" ? <TimelineView data={data} canManageDelivery={canManageDelivery && !isClientView} isClientView={isClientView} clientById={clientById} setPhaseProjectId={setPhaseProjectId} /> : null}
         {view === "releases" ? <Releases data={data} actor={actor} isClientView={isClientView} selectedRelease={selectedRelease} setSelectedReleaseId={setSelectedReleaseId} projectById={projectById} clientById={clientById} runAction={runAction} busy={busy} setPrintReleaseId={setPrintReleaseId} /> : null}
         {view === "feedback" ? <Feedback data={data} tickets={visibleTickets} query={query} setQuery={setQuery} statusFilter={statusFilter} setStatusFilter={setStatusFilter} setSelectedTicketId={setSelectedTicketId} boardMode={boardMode} setBoardMode={setBoardMode} myWork={myWork} setMyWork={setMyWork} unreadIds={unreadIds} visibleCount={visibleCount} setVisibleCount={setVisibleCount} isStaff={actor.isStaff && !previewClientId} runAction={runAction} /> : null}
         {view === "clients" && (!isClientView || canManageClientMembers) ? <Clients data={data} actor={actor} openMemberModal={openMemberModal} runAction={runAction} busy={busy} notify={notify} /> : null}
@@ -453,6 +475,9 @@ export function DeliveryLoopApp() {
 
       {selectedTicket ? (
         <FeedbackDrawer ticket={selectedTicket} actor={actor} project={projectById(selectedTicket.project_id)} release={releaseById(selectedTicket.release_id)} comments={data.comments.filter((comment) => comment.ticket_id === selectedTicket.id)} attachments={data.attachments.filter((attachment) => attachment.ticket_id === selectedTicket.id)} audit={data.audit.filter((event) => event.entity_id === selectedTicket.id)} siblingTickets={data.tickets.filter((item) => item.project_id === selectedTicket.project_id && item.id !== selectedTicket.id)} openTicketByKey={(key) => { const target = data.tickets.find((item) => item.key === key); if (target) setSelectedTicketId(target.id); }} assigneeOptions={(() => { const options = assigneesForProject(selectedTicket.project_id); return options.includes(selectedTicket.assignee) ? options : [...options, selectedTicket.assignee]; })()} templates={fullWorkspace.templates || []} mentionNames={[...new Set([...fullWorkspace.members.filter((member) => member.active === "1").map((member) => member.name), selectedTicket.reporter, selectedTicket.assignee])].filter((name) => name && name !== "Unassigned" && name !== actor.name)} isClientView={isClientView} canRespond={canReport} close={() => setSelectedTicketId(null)} runAction={runAction} busy={busy} notify={notify} />
+      ) : null}
+      {phaseProjectId && projectById(phaseProjectId) ? (
+        <PhaseModal project={projectById(phaseProjectId)!} phases={[...(fullWorkspace.phases || []).filter((phase) => phase.project_id === phaseProjectId)].sort((a, b) => a.sort - b.sort)} close={() => setPhaseProjectId(null)} runAction={runAction} busy={busy} />
       ) : null}
       {teamProjectId && projectById(teamProjectId) ? (
         <TeamModal project={projectById(teamProjectId)!} members={fullWorkspace.members} team={(fullWorkspace.projectTeam || []).filter((row) => row.project_id === teamProjectId)} actor={actor} close={() => setTeamProjectId(null)} runAction={runAction} busy={busy} />
@@ -472,8 +497,8 @@ export function DeliveryLoopApp() {
 }
 
 function pageTitle(view: View, isClientView: boolean) {
-  if (isClientView) return ({ releases: "Release testing", feedback: "Feedback and retesting", projects: "Project details", overview: "Overview", clients: "Access", reports: "Reports", settings: "Settings" } as Record<View, string>)[view];
-  return ({ overview: "Delivery overview", projects: "Projects", releases: "Release centre", feedback: "Feedback inbox", clients: "Clients and access", reports: "UAT reporting", settings: "Team and security" } as Record<View, string>)[view];
+  if (isClientView) return ({ releases: "Release testing", feedback: "Feedback and retesting", projects: "Project details", timeline: "Project timeline", overview: "Overview", clients: "Access", reports: "Reports", settings: "Settings" } as Record<View, string>)[view];
+  return ({ overview: "Delivery overview", projects: "Projects", timeline: "Delivery timeline", releases: "Release centre", feedback: "Feedback inbox", clients: "Clients and access", reports: "UAT reporting", settings: "Team and security" } as Record<View, string>)[view];
 }
 
 function LoadingScreen() {
@@ -560,11 +585,13 @@ function Projects({ data, isClientView, canManageDelivery, clientById, setView, 
       notify("Could not copy the bookmarklet to the clipboard");
     }
   }
+  const today = todayIso();
   return <div className="page-content"><div className="project-list">{data.projects.map((project) => {
     const client = clientById(project.client_id); const releases = data.releases.filter((release) => release.project_id === project.id); const tickets = data.tickets.filter((ticket) => ticket.project_id === project.id); const current = releases.find((release) => release.status !== "Approved") || releases[0];
     const scopeVersion = (data.scope || []).filter((version) => version.project_id === project.id).length;
+    const behindCount = (data.phases || []).filter((phase) => phase.project_id === project.id && phaseBehind(phase, today)).length;
     const teamNames = (data.projectTeam || []).filter((row) => row.project_id === project.id).map((row) => memberNameById.get(row.member_id)).filter((name): name is string => Boolean(name));
-    return <article className="project-row-card" key={project.id}><div className="project-identity"><span style={{ background: client?.accent }}>{project.code}</span><div><p>{client?.name}</p><h2>{project.name}</h2><small>{project.description}</small></div></div><dl><div><dt>Lead</dt><dd>{project.manager}</dd></div><div><dt>Stage</dt><dd><StatusBadge value={project.stage} /></dd></div><div><dt>Open feedback</dt><dd>{tickets.filter((ticket) => !closedStatuses.has(ticket.status)).length}</dd></div><div><dt>Current release</dt><dd>{current?.version || "—"}</dd></div></dl>{!isClientView ? <div className="project-team-row"><span className="project-team-label"><Users size={13} /> Team</span>{teamNames.length ? teamNames.map((name) => <span key={name} className="team-chip" title={name}><b>{initials(name)}</b><i>{name}</i></span>) : <span className="team-open-note">Open to all teammates</span>}{canManageDelivery ? <button className="quiet-button" onClick={() => setTeamProjectId(project.id)}><UserPlus size={13} /> Manage team</button> : null}</div> : null}<div className="row-actions"><button className="quiet-button" title="Agreed scope of work with full version history" onClick={() => setScopeProjectId(project.id)}><FileText size={14} /> Scope of work{scopeVersion ? <em className="scope-version-chip">v{scopeVersion}</em> : null}</button><button className="quiet-button" title="Copy a bookmarklet that opens a prefilled feedback form from any staging page" onClick={() => copyBookmarklet(project.name)}><Copy size={14} /> Capture tool</button>{project.staging_url ? <a href={project.staging_url} target="_blank" rel="noreferrer" className="quiet-button">Staging <ExternalLink size={14} /></a> : null}{current ? <button className="secondary-button" onClick={() => { setSelectedReleaseId(current.id); setView("releases"); }}>View release <ChevronRight size={14} /></button> : null}</div>{isClientView ? <span className="client-access-note"><ShieldCheck size={14} /> Your organisation only</span> : null}</article>;
+    return <article className="project-row-card" key={project.id}><div className="project-identity"><span style={{ background: client?.accent }}>{project.code}</span><div><p>{client?.name}</p><h2>{project.name}</h2><small>{project.description}</small></div></div><dl><div><dt>Lead</dt><dd>{project.manager}</dd></div><div><dt>Stage</dt><dd><StatusBadge value={project.stage} /></dd></div><div><dt>Open feedback</dt><dd>{tickets.filter((ticket) => !closedStatuses.has(ticket.status)).length}</dd></div><div><dt>Current release</dt><dd>{current?.version || "—"}</dd></div></dl>{!isClientView ? <div className="project-team-row"><span className="project-team-label"><Users size={13} /> Team</span>{teamNames.length ? teamNames.map((name) => <span key={name} className="team-chip" title={name}><b>{initials(name)}</b><i>{name}</i></span>) : <span className="team-open-note">Open to all teammates</span>}{canManageDelivery ? <button className="quiet-button" onClick={() => setTeamProjectId(project.id)}><UserPlus size={13} /> Manage team</button> : null}</div> : null}<div className="row-actions"><button className="quiet-button" title="Agreed scope of work with full version history" onClick={() => setScopeProjectId(project.id)}><FileText size={14} /> Scope of work{scopeVersion ? <em className="scope-version-chip">v{scopeVersion}</em> : null}</button><button className="quiet-button" title="Phase plan and Gantt timeline" onClick={() => setView("timeline")}><CalendarRange size={14} /> Timeline{behindCount ? <em className="phase-risk-chip" title={`${behindCount} phase${behindCount === 1 ? " is" : "s are"} past the planned end date`}>{behindCount} behind</em> : null}</button><button className="quiet-button" title="Copy a bookmarklet that opens a prefilled feedback form from any staging page" onClick={() => copyBookmarklet(project.name)}><Copy size={14} /> Capture tool</button>{project.staging_url ? <a href={project.staging_url} target="_blank" rel="noreferrer" className="quiet-button">Staging <ExternalLink size={14} /></a> : null}{current ? <button className="secondary-button" onClick={() => { setSelectedReleaseId(current.id); setView("releases"); }}>View release <ChevronRight size={14} /></button> : null}</div>{isClientView ? <span className="client-access-note"><ShieldCheck size={14} /> Your organisation only</span> : null}</article>;
   })}</div>
   {!isClientView && data.directory?.length ? <section className="project-directory">
     <header className="section-header"><div><p>Rest of the agency</p><h2>Other projects in progress</h2></div></header>
@@ -578,6 +605,157 @@ function Projects({ data, isClientView, canManageDelivery, clientById, setView, 
       </article>)}
     </div>
   </section> : null}
+  </div>;
+}
+
+function TimelineView({ data, canManageDelivery, isClientView, clientById, setPhaseProjectId }: { data: Workspace; canManageDelivery: boolean; isClientView: boolean; clientById: (id: string) => Client | undefined; setPhaseProjectId: (id: string) => void }) {
+  const today = todayIso();
+  const todayNum = dayNumber(today);
+  const allPhases = data.phases || [];
+  const phasedProjectIds = new Set(allPhases.map((phase) => phase.project_id));
+
+  // The chart spans every planned date (baselines included) plus release due
+  // dates and today, padded so bars never touch the edges.
+  let min = todayNum;
+  let max = todayNum;
+  for (const phase of allPhases) {
+    min = Math.min(min, dayNumber(phase.start_date), phase.baseline_start ? dayNumber(phase.baseline_start) : todayNum);
+    max = Math.max(max, dayNumber(phase.end_date), phase.baseline_end ? dayNumber(phase.baseline_end) : todayNum);
+  }
+  for (const release of data.releases) {
+    if (phasedProjectIds.has(release.project_id)) max = Math.max(max, dayNumber(release.due_date));
+  }
+  min -= 4;
+  max += 6;
+  const span = max - min;
+  const pos = (date: string) => ((dayNumber(date) - min) / span) * 100;
+
+  const months: { left: number; label: string }[] = [];
+  const first = new Date(min * DAY_MS);
+  let year = first.getUTCFullYear();
+  let month = first.getUTCMonth();
+  for (let guard = 0; guard < 40; guard++) {
+    const monthStart = Math.round(Date.UTC(year, month, 1, 12) / DAY_MS);
+    if (monthStart > max) break;
+    if (monthStart >= min) {
+      months.push({
+        left: ((monthStart - min) / span) * 100,
+        label: new Intl.DateTimeFormat("en-IN", { month: "short", ...(months.length === 0 || month === 0 ? { year: "numeric" } : {}) }).format(new Date(Date.UTC(year, month, 1, 12))),
+      });
+    }
+    month++;
+    if (month > 11) { month = 0; year++; }
+  }
+
+  if (!data.projects.length) {
+    return <div className="page-content"><EmptyState icon={CalendarRange} title="No projects yet" body="Create a project first, then plan its phases here." /></div>;
+  }
+
+  return <div className="page-content timeline-page">
+    <div className="timeline-legend surface">
+      <span><i className="legend-swatch done" /> Done</span>
+      <span><i className="legend-swatch active" /> In progress</span>
+      <span><i className="legend-swatch planned" /> Planned</span>
+      <span><i className="legend-swatch overdue" /> Past planned end</span>
+      <span><i className="legend-swatch baseline" /> Originally agreed dates</span>
+      <span><i className="legend-swatch release" /> Release due</span>
+    </div>
+    {data.projects.map((project) => {
+      const client = clientById(project.client_id);
+      const phases = [...allPhases.filter((phase) => phase.project_id === project.id)].sort((a, b) => a.sort - b.sort);
+      const releases = data.releases.filter((release) => release.project_id === project.id);
+      const behind = phases.filter((phase) => phaseBehind(phase, today)).length;
+      return <article className="surface timeline-lane" key={project.id}>
+        <header className="timeline-lane-head">
+          <span className="lane-code" style={{ background: client?.accent }}>{project.code}</span>
+          <div><h2>{project.name}</h2><small>{client?.name} · led by {project.manager}</small></div>
+          {behind ? <em className="phase-risk-chip"><AlertTriangle size={12} /> {behind} phase{behind === 1 ? "" : "s"} behind plan</em> : null}
+          {canManageDelivery ? <button className="quiet-button" onClick={() => setPhaseProjectId(project.id)}><Pencil size={13} /> {phases.length ? "Edit plan" : "Plan timeline"}</button> : null}
+        </header>
+        {phases.length ? <div className="gantt-scroll"><div className="gantt">
+          <div className="gantt-names">
+            <span className="gantt-names-head" />
+            {phases.map((phase) => <span key={phase.id} className="gantt-name"><b>{phase.name}</b><small>{phase.status}</small></span>)}
+            {releases.length ? <span className="gantt-name releases-label"><b>Releases</b></span> : null}
+          </div>
+          <div className="gantt-plot">
+            <div className="gantt-months">{months.map((tick) => <span key={tick.label + tick.left} style={{ left: `${tick.left}%` }}>{tick.label}</span>)}</div>
+            {months.map((tick) => <i key={`grid-${tick.left}`} className="gantt-gridline" style={{ left: `${tick.left}%` }} />)}
+            <span className="gantt-today" style={{ left: `${pos(today)}%` }}><i>Today</i></span>
+            {phases.map((phase) => {
+              const left = pos(phase.start_date);
+              const width = Math.max(((dayNumber(phase.end_date) - dayNumber(phase.start_date) + 1) / span) * 100, 0.8);
+              const behindPlan = phaseBehind(phase, today);
+              const tone = behindPlan ? "overdue" : phase.status === "Done" ? "done" : phase.status === "In progress" ? "active" : "planned";
+              const moved = phase.baseline_start && phase.baseline_end && (phase.baseline_start !== phase.start_date || phase.baseline_end !== phase.end_date);
+              return <div className="gantt-track" key={phase.id}>
+                {moved ? <span className="gantt-baseline" style={{ left: `${pos(phase.baseline_start)}%`, width: `${Math.max(((dayNumber(phase.baseline_end) - dayNumber(phase.baseline_start) + 1) / span) * 100, 0.8)}%` }} title={`Originally agreed: ${formatDate(phase.baseline_start)} – ${formatDate(phase.baseline_end, true)}`} /> : null}
+                <span className={`gantt-bar ${tone}`} style={{ left: `${left}%`, width: `${width}%` }} title={`${phase.name} · ${formatDate(phase.start_date)} – ${formatDate(phase.end_date, true)} · ${behindPlan ? "Past the planned end date" : phase.status}`}>
+                  <b>{formatDate(phase.start_date)} – {formatDate(phase.end_date)}</b>
+                </span>
+              </div>;
+            })}
+            {releases.length ? <div className="gantt-track releases-track">
+              {releases.map((release) => <span key={release.id} className={`gantt-release ${release.status === "Approved" ? "approved" : ""}`} style={{ left: `${pos(release.due_date)}%` }} title={`${release.version} · ${release.name} — due ${formatDate(release.due_date, true)} (${release.status})`}><i /><small>{release.version}</small></span>)}
+            </div> : null}
+          </div>
+        </div></div> : <div className="timeline-empty">
+          <CalendarRange size={18} />
+          <span><b>No timeline planned yet</b><small>{canManageDelivery ? "Set the agreed phases — discovery, build, UAT, launch — or one single delivery window." : isClientView ? "Your delivery team has not published a timeline for this project yet." : "An admin or the project manager can plan the phases."}</small></span>
+          {canManageDelivery ? <button className="secondary-button" onClick={() => setPhaseProjectId(project.id)}><Plus size={14} /> Plan timeline</button> : null}
+        </div>}
+      </article>;
+    })}
+    {isClientView ? <div className="client-help"><ShieldCheck size={17} /><span><b>This is your organisation&apos;s delivery plan.</b><small>Faded bars show the originally agreed dates whenever a phase has been re-planned.</small></span></div> : null}
+  </div>;
+}
+
+type DraftPhase = { id: string; name: string; startDate: string; endDate: string; status: string };
+
+function PhaseModal({ project, phases, close, runAction, busy }: { project: Project; phases: ProjectPhase[]; close: () => void; runAction: RunAction; busy: boolean }) {
+  const [rows, setRows] = useState<DraftPhase[]>(phases.length
+    ? phases.map((phase) => ({ id: phase.id, name: phase.name, startDate: phase.start_date, endDate: phase.end_date, status: phase.status }))
+    : [{ id: "", name: "", startDate: "", endDate: "", status: "Planned" }]);
+  function update(index: number, key: keyof DraftPhase, value: string) {
+    setRows((current) => current.map((row, i) => i === index ? { ...row, [key]: value } : row));
+  }
+  function addRow() {
+    setRows((current) => [...current, { id: "", name: "", startDate: current[current.length - 1]?.endDate || "", endDate: "", status: "Planned" }]);
+  }
+  function removeRow(index: number) {
+    setRows((current) => current.filter((_, i) => i !== index));
+  }
+  const cleaned = rows.filter((row) => row.name.trim() || row.startDate || row.endDate);
+  const incomplete = cleaned.some((row) => !row.name.trim() || !row.startDate || !row.endDate);
+  const misordered = cleaned.some((row) => row.startDate && row.endDate && row.endDate < row.startDate);
+  async function save() {
+    const payload = cleaned.map((row) => ({ ...(row.id ? { id: row.id } : {}), name: row.name.trim(), startDate: row.startDate, endDate: row.endDate, status: row.status }));
+    const ok = await runAction("savePhases", { projectId: project.id, phases: JSON.stringify(payload) }, payload.length ? "Timeline saved" : "Timeline cleared");
+    if (ok) close();
+  }
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) close(); }}>
+    <section className="modal-card phase-card" role="dialog" aria-modal="true" aria-label={`Timeline for ${project.name}`}>
+      <header><div><p>Project timeline</p><h2>{project.name}</h2></div><button onClick={close} aria-label="Close"><X size={19} /></button></header>
+      <div className="phase-shell">
+        <div className="modal-callout"><CalendarRange size={17} /><span>The dates you first save become the agreed baseline. If a phase moves later, the Gantt keeps showing the original dates underneath — and every change is recorded with your name in the audit trail.</span></div>
+        <div className="phase-rows">
+          <div className="phase-row phase-row-head"><span>Phase</span><span>Starts</span><span>Ends</span><span>Status</span><span /></div>
+          {rows.map((row, index) => <div className="phase-row" key={row.id || `new-${index}`}>
+            <input value={row.name} maxLength={80} placeholder={index === 0 ? "e.g. Discovery & design" : "Phase name"} aria-label={`Phase ${index + 1} name`} onChange={(event) => update(index, "name", event.target.value)} />
+            <input type="date" value={row.startDate} aria-label={`Phase ${index + 1} start date`} onChange={(event) => update(index, "startDate", event.target.value)} />
+            <input type="date" value={row.endDate} min={row.startDate || undefined} aria-label={`Phase ${index + 1} end date`} onChange={(event) => update(index, "endDate", event.target.value)} />
+            <select value={row.status} aria-label={`Phase ${index + 1} status`} onChange={(event) => update(index, "status", event.target.value)}><option>Planned</option><option>In progress</option><option>Done</option></select>
+            <button type="button" className="phase-remove" aria-label={`Remove phase ${index + 1}`} title="Remove phase" disabled={busy} onClick={() => removeRow(index)}><Trash2 size={14} /></button>
+          </div>)}
+        </div>
+        <button type="button" className="quiet-button phase-add" disabled={busy || rows.length >= 20} onClick={addRow}><Plus size={14} /> Add phase</button>
+        <p className="phase-hint">A single delivery window is just one phase. {misordered ? "One of the phases ends before it starts." : incomplete ? "Give every phase a name, start and end date." : ""}</p>
+        <footer className="phase-footer">
+          <span>{cleaned.length ? `${cleaned.length} phase${cleaned.length === 1 ? "" : "s"}` : "Saving with no phases clears the timeline"}</span>
+          <div><button type="button" className="quiet-button" onClick={close}>Cancel</button><button className="primary-button" disabled={busy || incomplete || misordered} onClick={() => void save()}>{busy ? "Saving…" : "Save timeline"}</button></div>
+        </footer>
+      </div>
+    </section>
   </div>;
 }
 

@@ -123,6 +123,13 @@ const tableStatements = [
     author TEXT NOT NULL, author_role TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
+  `CREATE TABLE IF NOT EXISTS project_phases (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL,
+    start_date TEXT NOT NULL, end_date TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Planned',
+    baseline_start TEXT NOT NULL DEFAULT '', baseline_end TEXT NOT NULL DEFAULT '',
+    sort INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
   `CREATE TABLE IF NOT EXISTS audit_events (
     id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
     action TEXT NOT NULL, actor TEXT NOT NULL, details TEXT NOT NULL DEFAULT '',
@@ -140,6 +147,7 @@ const tableStatements = [
   `CREATE UNIQUE INDEX IF NOT EXISTS scope_versions_project_version_idx ON scope_versions(project_id, version)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS project_members_project_member_idx ON project_members(project_id, member_id)`,
   `CREATE INDEX IF NOT EXISTS attachments_ticket_idx ON attachments(ticket_id)`,
+  `CREATE INDEX IF NOT EXISTS project_phases_project_idx ON project_phases(project_id)`,
 ];
 
 function id(prefix: string) {
@@ -154,6 +162,7 @@ const SEVERITIES = new Set(["Critical", "High", "Medium", "Low"]);
 const PRIORITIES = new Set(["Urgent", "High", "Normal", "Low"]);
 const TICKET_STATUSES = new Set(["Submitted", "Triaged", "In progress", "Needs information", "Approval required", "Ready for retest", "Verified", "Closed", "Deferred", "Rejected / out of scope", "Reopened", "Withdrawn"]);
 const CHECK_STATES = new Set(["Not tested", "Passed", "Failed"]);
+const PHASE_STATUSES = new Set(["Planned", "In progress", "Done"]);
 
 function required(input: Record<string, string>, key: string, label: string, max = 500) {
   const value = (input[key] || "").trim();
@@ -302,6 +311,17 @@ async function seedDatabase(db: D1Database) {
   ];
   for (const version of scopeSeed) add("INSERT INTO scope_versions (id,project_id,version,body,change_note,author,author_role,created_at) VALUES (?,?,?,?,?,?,?,?)", ...version);
 
+  const phaseSeed = [
+    ["phase-ns-1", "project-northstar", "Discovery & design", "2026-05-04", "2026-05-15", "Done", "2026-05-04", "2026-05-15", 0],
+    ["phase-ns-2", "project-northstar", "Build", "2026-05-18", "2026-06-26", "Done", "2026-05-18", "2026-06-19", 1],
+    ["phase-ns-3", "project-northstar", "Client UAT", "2026-06-29", "2026-07-24", "In progress", "2026-06-22", "2026-07-17", 2],
+    ["phase-ns-4", "project-northstar", "Launch", "2026-07-27", "2026-07-31", "Planned", "2026-07-20", "2026-07-24", 3],
+    ["phase-at-1", "project-atlas", "Build", "2026-05-11", "2026-06-19", "Done", "2026-05-11", "2026-06-19", 0],
+    ["phase-at-2", "project-atlas", "Client UAT", "2026-06-22", "2026-07-19", "In progress", "2026-06-22", "2026-07-19", 1],
+    ["phase-vd-1", "project-veda", "Delivery", "2026-07-01", "2026-08-14", "In progress", "2026-07-01", "2026-08-14", 0],
+  ];
+  for (const phase of phaseSeed) add("INSERT INTO project_phases (id,project_id,name,start_date,end_date,status,baseline_start,baseline_end,sort) VALUES (?,?,?,?,?,?,?,?,?)", ...phase);
+
   add("INSERT INTO audit_events (id,entity_type,entity_id,action,actor,details) VALUES (?,?,?,?,?,?)", "audit-1", "release", "release-checkout", "Release opened for UAT", "Aarav Patel", "Northstar client testers invited");
   add("INSERT INTO audit_events (id,entity_type,entity_id,action,actor,details) VALUES (?,?,?,?,?,?)", "audit-2", "ticket", "ticket-4", "Ready for retest", "Isha Verma", "Fix deployed in build-483");
   await db.batch(queries);
@@ -346,7 +366,7 @@ export async function resolveActor(identity: { email: string; name: string } | n
 
 export async function getWorkspace(actor: Actor) {
   const db = await ensureDatabase();
-  const [clients, projects, releases, checklist, tickets, comments, audit, members, attachments, templates, scope, team] = await Promise.all([
+  const [clients, projects, releases, checklist, tickets, comments, audit, members, attachments, templates, scope, team, phases] = await Promise.all([
     db.prepare("SELECT * FROM clients ORDER BY created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM projects ORDER BY created_at DESC").all<Record<string, unknown>>(),
     db.prepare("SELECT * FROM releases ORDER BY due_date ASC").all<Record<string, unknown>>(),
@@ -365,12 +385,13 @@ export async function getWorkspace(actor: Actor) {
     // whole workspace down over the optional scope-of-work table.
     db.prepare("SELECT * FROM scope_versions ORDER BY project_id ASC, version ASC").all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] })),
     db.prepare("SELECT * FROM project_members ORDER BY created_at ASC").all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] })),
+    db.prepare("SELECT * FROM project_phases ORDER BY project_id ASC, sort ASC, start_date ASC").all<Record<string, unknown>>().catch(() => ({ results: [] as Record<string, unknown>[] })),
   ]);
 
   if (actor.isStaff) {
     const teamRows = team.results as { project_id: string; member_id: string }[];
     if (actor.role === "agency_admin") {
-      return { clients: clients.results, projects: projects.results, releases: releases.results, checklist: checklist.results, tickets: tickets.results, comments: comments.results, audit: audit.results, members: members.results, attachments: attachments.results, templates: templates.results, scope: scope.results, projectTeam: team.results, directory: [] as Record<string, unknown>[] };
+      return { clients: clients.results, projects: projects.results, releases: releases.results, checklist: checklist.results, tickets: tickets.results, comments: comments.results, audit: audit.results, members: members.results, attachments: attachments.results, templates: templates.results, scope: scope.results, projectTeam: team.results, phases: phases.results, directory: [] as Record<string, unknown>[] };
     }
     // Project managers and developers get full detail only for projects whose
     // team they are on. Projects with no team assigned stay open to everyone.
@@ -404,6 +425,7 @@ export async function getWorkspace(actor: Actor) {
       templates: templates.results,
       scope: scope.results.filter((version) => accessibleIds.has(version.project_id)),
       projectTeam: team.results.filter((row) => accessibleIds.has(row.project_id)),
+      phases: phases.results.filter((phase) => accessibleIds.has(phase.project_id)),
       directory,
     };
   }
@@ -434,6 +456,7 @@ export async function getWorkspace(actor: Actor) {
     templates: [],
     scope: scope.results.filter((version) => projectIds.has(version.project_id)),
     projectTeam: [] as Record<string, unknown>[],
+    phases: phases.results.filter((phase) => projectIds.has(phase.project_id)),
     directory: [] as Record<string, unknown>[],
   };
 }
@@ -966,6 +989,67 @@ export async function saveScope(input: Record<string, string>, actor: Actor) {
     .run();
   await audit(db, "scope", projectId, version === 1 ? "Scope of work recorded" : `Scope revised to v${version}`, actor, changeNote || "Initial agreed scope");
   return { versionId, version };
+}
+
+export async function savePhases(input: Record<string, string>, actor: Actor) {
+  requireRole(actor, ["agency_admin", "project_manager"], "Only administrators and project managers can plan the project timeline");
+  const db = await ensureDatabase();
+  const projectId = required(input, "projectId", "Project", 100);
+  const project = await db.prepare("SELECT name FROM projects WHERE id = ?").bind(projectId).first<{ name: string }>();
+  if (!project) throw new AccessError("Project not found", 404);
+  await assertProjectAccess(db, actor, projectId);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input.phases || "[]");
+  } catch {
+    throw new AccessError("Invalid timeline data", 400);
+  }
+  if (!Array.isArray(parsed)) throw new AccessError("Invalid timeline data", 400);
+  if (parsed.length > 20) throw new AccessError("A timeline can have at most 20 phases", 400);
+  const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+  const phases = parsed.map((entry) => {
+    const row = (entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {}) as Record<string, unknown>;
+    const name = String(row.name || "").trim();
+    const startDate = String(row.startDate || "").trim();
+    const endDate = String(row.endDate || "").trim();
+    const status = String(row.status || "Planned");
+    const phaseId = typeof row.id === "string" && /^phase-[A-Za-z0-9-]{1,80}$/.test(row.id) ? row.id : "";
+    if (!name || name.length > 80) throw new AccessError("Every phase needs a name of up to 80 characters", 400);
+    if (!datePattern.test(startDate) || !datePattern.test(endDate) || Number.isNaN(Date.parse(startDate)) || Number.isNaN(Date.parse(endDate))) {
+      throw new AccessError(`Give “${name}” a valid start and end date`, 400);
+    }
+    if (endDate < startDate) throw new AccessError(`“${name}” ends before it starts`, 400);
+    if (!PHASE_STATUSES.has(status)) throw new AccessError("Choose a valid phase status", 400);
+    return { id: phaseId, name, startDate, endDate, status };
+  });
+  const existing = await db.prepare("SELECT id,name,start_date,end_date,baseline_start,baseline_end FROM project_phases WHERE project_id = ?")
+    .bind(projectId).all<{ id: string; name: string; start_date: string; end_date: string; baseline_start: string; baseline_end: string }>()
+    .catch(() => ({ results: [] as { id: string; name: string; start_date: string; end_date: string; baseline_start: string; baseline_end: string }[] }));
+  const existingById = new Map(existing.results.map((row) => [row.id, row]));
+  await enforceRateLimit(actor, "project:timeline", 60, 60);
+  await db.batch([
+    db.prepare("DELETE FROM project_phases WHERE project_id = ?").bind(projectId),
+    ...phases.map((phase, index) => {
+      const prior = phase.id ? existingById.get(phase.id) : undefined;
+      // The first agreed dates become the baseline and later edits keep it, so
+      // the Gantt can show slippage against what was originally planned.
+      return db.prepare("INSERT INTO project_phases (id,project_id,name,start_date,end_date,status,baseline_start,baseline_end,sort) VALUES (?,?,?,?,?,?,?,?,?)")
+        .bind(prior ? phase.id : id("phase"), projectId, phase.name, phase.startDate, phase.endDate, phase.status,
+          prior?.baseline_start || phase.startDate, prior?.baseline_end || phase.endDate, index);
+    }),
+  ]);
+  const changes: string[] = [];
+  for (const phase of phases) {
+    const prior = phase.id ? existingById.get(phase.id) : undefined;
+    if (!prior) changes.push(`Added ${phase.name} (${phase.startDate} to ${phase.endDate})`);
+    else if (prior.start_date !== phase.startDate || prior.end_date !== phase.endDate) changes.push(`${phase.name} moved from ${prior.start_date}–${prior.end_date} to ${phase.startDate}–${phase.endDate}`);
+  }
+  const keptIds = new Set(phases.map((phase) => phase.id).filter(Boolean));
+  for (const row of existing.results) {
+    if (!keptIds.has(row.id)) changes.push(`Removed ${row.name}`);
+  }
+  await audit(db, "project", projectId, phases.length ? "Timeline updated" : "Timeline cleared", actor,
+    changes.join("; ").slice(0, 500) || `${phases.length} phases confirmed`);
 }
 
 export async function updateChecklist(input: Record<string, string>, actor: Actor) {
