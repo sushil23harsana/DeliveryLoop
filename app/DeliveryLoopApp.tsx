@@ -849,9 +849,18 @@ const PHASE_PRESETS: { id: string; label: string; hint: string; phases: { name: 
 ];
 
 function PhaseModal({ project, phases, close, runAction, busy }: { project: Project; phases: ProjectPhase[]; close: () => void; runAction: RunAction; busy: boolean }) {
-  const [rows, setRows] = useState<DraftPhase[]>(phases.length
-    ? phases.map((phase) => ({ id: phase.id, name: phase.name, startDate: phase.start_date, endDate: phase.end_date, status: phase.status }))
-    : [{ id: "", name: "", startDate: "", endDate: "", status: "Planned" }]);
+  // A fresh timeline opens pre-filled with the agency default (Fast-track MVP)
+  // starting today, so the common case is "adjust a date or two and save".
+  const [rows, setRows] = useState<DraftPhase[]>(() => {
+    if (phases.length) return phases.map((phase) => ({ id: phase.id, name: phase.name, startDate: phase.start_date, endDate: phase.end_date, status: phase.status }));
+    let cursor = dayNumber(todayIso());
+    return PHASE_PRESETS[0].phases.map((phase) => {
+      const startDate = isoFromDay(cursor);
+      const endDate = isoFromDay(cursor + phase.days - 1);
+      cursor += phase.days;
+      return { id: "", name: phase.name, startDate, endDate, status: "Planned" };
+    });
+  });
   const [presetStart, setPresetStart] = useState(todayIso());
   function applyPreset(preset: typeof PHASE_PRESETS[number]) {
     let cursor = dayNumber(presetStart || todayIso());
@@ -887,9 +896,9 @@ function PhaseModal({ project, phases, close, runAction, busy }: { project: Proj
         <div className="preset-row">
           <span className="preset-label">Start from a preset</span>
           <input type="date" value={presetStart} aria-label="Preset start date" onChange={(event) => setPresetStart(event.target.value)} />
-          {PHASE_PRESETS.map((preset) => <button key={preset.id} type="button" className="quiet-button" title={preset.hint} disabled={busy} onClick={() => applyPreset(preset)}>{preset.label}</button>)}
+          {PHASE_PRESETS.map((preset) => <button key={preset.id} type="button" className="quiet-button" title={preset.hint} disabled={busy} onClick={() => applyPreset(preset)}>{preset.label}{preset.id === "fast" ? <em className="scope-version-chip">Default</em> : null}</button>)}
         </div>
-        <p className="phase-hint preset-hint">Presets replace the rows below with a standard plan starting on the chosen date — rename phases and nudge dates freely before saving.</p>
+        <p className="phase-hint preset-hint">{phases.length ? "Presets replace the rows below with a standard plan starting on the chosen date." : "Pre-filled with the Fast-track MVP plan starting today — nudge dates, rename phases, or switch preset."}</p>
         <div className="phase-rows">
           <div className="phase-row phase-row-head"><span>Phase</span><span>Starts</span><span>Ends</span><span>Status</span><span /></div>
           {rows.map((row, index) => <div className="phase-row" key={row.id || `new-${index}`}>
