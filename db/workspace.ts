@@ -759,6 +759,40 @@ export async function createRelease(input: Record<string, string> & { checklist?
   return releaseId;
 }
 
+export async function addChecklistItems(input: Record<string, string> & { checklist?: string[] }, actor: Actor) {
+  requireRole(actor, ["agency_admin", "project_manager"], "Only administrators and project managers can edit the acceptance checklist");
+  const db = await ensureDatabase();
+  const releaseId = required(input, "releaseId", "Release", 100);
+  const release = await db.prepare("SELECT project_id, status FROM releases WHERE id = ?").bind(releaseId).first<{ project_id: string; status: string }>();
+  if (!release) throw new AccessError("Release not found", 404);
+  await assertProjectAccess(db, actor, release.project_id);
+  if (release.status === "Approved") throw new AccessError("This release is approved — its checklist is locked", 400);
+  const items = (input.checklist || []).map((item) => item.trim()).filter(Boolean);
+  if (!items.length) throw new AccessError("Add at least one checklist item", 400);
+  if (items.some((item) => item.length > 180)) throw new AccessError("Checklist items can be up to 180 characters", 400);
+  const count = await db.prepare("SELECT COUNT(*) AS count FROM checklist_items WHERE release_id = ?").bind(releaseId).first<{ count: number }>();
+  if ((count?.count || 0) + items.length > 50) throw new AccessError("A release can have up to 50 checklist items", 400);
+  await enforceRateLimit(actor, "checklist:edit", 60, 60);
+  await db.batch(items.map((title) => db.prepare("INSERT INTO checklist_items (id,release_id,title,state) VALUES (?,?,?,?)").bind(id("check"), releaseId, title, "Not tested")));
+  await audit(db, "release", releaseId, "Checklist items added", actor, items.join("; ").slice(0, 300));
+}
+
+export async function removeChecklistItem(input: Record<string, string>, actor: Actor) {
+  requireRole(actor, ["agency_admin", "project_manager"], "Only administrators and project managers can edit the acceptance checklist");
+  const db = await ensureDatabase();
+  const itemId = required(input, "itemId", "Checklist item", 100);
+  const item = await db.prepare(`SELECT c.title, c.state, r.id AS release_id, r.project_id, r.status FROM checklist_items c
+    JOIN releases r ON r.id = c.release_id WHERE c.id = ?`)
+    .bind(itemId).first<{ title: string; state: string; release_id: string; project_id: string; status: string }>();
+  if (!item) throw new AccessError("Checklist item not found", 404);
+  await assertProjectAccess(db, actor, item.project_id);
+  if (item.status === "Approved") throw new AccessError("This release is approved — its checklist is locked", 400);
+  if (item.state !== "Not tested") throw new AccessError("This flow has already been tested — it stays on the record", 400);
+  await enforceRateLimit(actor, "checklist:edit", 60, 60);
+  await db.prepare("DELETE FROM checklist_items WHERE id = ?").bind(itemId).run();
+  await audit(db, "release", item.release_id, "Checklist item removed", actor, item.title);
+}
+
 async function validateAttachmentKey(key: string, actor: Actor) {
   if (!/^[a-f0-9-]+\.(png|jpg|webp|gif)$/i.test(key)) throw new AccessError("Invalid screenshot reference", 400);
   const upload = await getUploads().head(key);

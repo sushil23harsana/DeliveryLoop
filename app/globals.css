@@ -409,6 +409,14 @@ code, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
 .check-chip.on.none { background: color-mix(in srgb, var(--c-gray) 15%, transparent); color: var(--c-gray); opacity: 1; }
 .check-chip.on.passed { background: color-mix(in srgb, var(--c-green) 15%, transparent); color: var(--c-green); opacity: 1; }
 .check-chip.on.failed { background: color-mix(in srgb, var(--c-red) 15%, transparent); color: var(--c-red); opacity: 1; }
+.check-remove { width: 26px; height: 26px; flex: none; display: grid; place-items: center; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; transition: background 0.15s, color 0.15s; }
+.check-remove:hover { background: var(--danger-soft); color: var(--danger); }
+.check-add { display: flex; gap: 8px; padding: 12px 18px 16px; border-top: 1px solid var(--line2); }
+.check-add input { flex: 1; min-width: 0; height: 38px; padding: 0 11px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); color: var(--ink); font-size: 12.5px; outline: 0; transition: border-color 0.18s, box-shadow 0.18s; }
+.check-add input:focus { border-color: var(--focus-ring); box-shadow: 0 0 0 3px var(--brand-soft); }
+.check-add .secondary-button { min-height: 38px; }
+.field-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.field-actions > em { flex: 1; min-width: 200px; color: var(--muted); font-size: 11.5px; font-style: normal; line-height: 1.5; }
 .gate-list { padding: 8px 19px 6px; }
 .gate-list > div { min-height: 52px; padding: 9px 0; display: flex; align-items: center; gap: 11px; border-bottom: 1px solid var(--line2); }
 .gate-list > div:last-child { border-bottom: 0; }

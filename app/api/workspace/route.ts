@@ -1,4 +1,5 @@
 import {
+  addChecklistItems,
   addComment,
   approveRelease,
   createClient,
@@ -11,6 +12,7 @@ import {
   editTicket,
   getWorkspace,
   markDuplicate,
+  removeChecklistItem,
   resendMemberInvite,
   savePhases,
   saveScope,
@@ -55,6 +57,8 @@ export async function POST(request: Request) {
       case "saveScope": result = await saveScope(payload, actor); break;
       case "savePhases": result = await savePhases(payload, actor); break;
       case "updateChecklist": result = await updateChecklist(payload, actor); break;
+      case "addChecklistItems": result = await addChecklistItems(payload, actor); break;
+      case "removeChecklistItem": result = await removeChecklistItem(payload, actor); break;
       case "approveRelease": result = await approveRelease(payload, actor); break;
       default: return json({ error: "Unknown action" }, { status: 400 });
     }
