@@ -1,0 +1,52 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "deliveryloop",
+  "main": "./worker/index.ts",
+  "account_id": "182a16f38154f634935ba184bed0a873",
+  "compatibility_date": "2026-07-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "upload_source_maps": true,
+  "assets": {
+    "binding": "ASSETS",
+    // Hashed static assets are served directly; the worker cannot serve them
+    // (the vinext handler has no ASSETS fallback, so worker-first on /assets/*
+    // returns 404). API routes always run the worker for auth and no-store.
+    "run_worker_first": ["/api/*"]
+  },
+  "images": {
+    "binding": "IMAGES"
+  },
+  "vars": {
+    "APP_ENV": "production",
+    "BETTER_AUTH_URL": "https://deliveryloop.altrd-brain.workers.dev",
+    "BOOTSTRAP_ADMIN_EMAIL": "sushil23harsana@gmail.com",
+    // Resend test sender: delivers only to the Resend account owner's email.
+    // Swap for "DeliveryLoop <delivery@updates.yourdomain.com>" once a
+    // sending domain is verified in Resend.
+    "EMAIL_FROM": "DeliveryLoop <onboarding@resend.dev>"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "deliveryloop-prod",
+      "database_id": "c2fbe7ea-c15d-4784-bdc2-19fbff14aecb",
+      "migrations_dir": "./drizzle"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "UPLOADS",
+      "bucket_name": "deliveryloop-uploads"
+    }
+  ],
+  "triggers": {
+    // 03:30 UTC = 09:00 IST — daily digest emails before the workday starts.
+    "crons": ["30 3 * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

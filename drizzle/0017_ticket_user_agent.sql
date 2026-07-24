@@ -1,0 +1,1 @@
+ALTER TABLE `tickets` ADD COLUMN `user_agent` TEXT NOT NULL DEFAULT '';

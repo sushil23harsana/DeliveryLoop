@@ -1,16 +1,26 @@
-import { getChatGPTUser } from "../chatgpt-auth";
+import { assertAuthConfigured, auth } from "../auth";
+import { isProduction } from "../runtime-env";
 import { AccessError, resolveActor, type Actor } from "../../db/workspace";
 
-export type ActionPayload = Record<string, string> & { checklist?: string[] };
+export type ActionPayload = Record<string, string> & { checklist?: string[]; attachmentKeys?: string[]; memberIds?: string[]; ticketIds?: string[] };
+
+const ARRAY_PAYLOAD_KEYS = new Set(["checklist", "attachmentKeys", "memberIds", "ticketIds"]);
 
 function localDemoAllowed(request: Request) {
+  // When this returns true and there is no session, resolveActor synthesises a
+  // full agency_admin with no database row. Hostname alone is too thin a guard
+  // for that: request.url derives from the Host header, so the only thing
+  // standing between an unauthenticated caller and global admin would be
+  // Cloudflare's routing — a routing property, not an application control.
+  if (isProduction()) return false;
   const hostname = new URL(request.url).hostname;
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
 
 export async function requestActor(request: Request): Promise<Actor> {
-  const user = await getChatGPTUser();
-  return resolveActor(user ? { email: user.email, name: user.displayName } : null, localDemoAllowed(request));
+  assertAuthConfigured();
+  const session = await auth.api.getSession({ headers: request.headers });
+  return resolveActor(session?.user ? { email: session.user.email, name: session.user.name } : null, localDemoAllowed(request));
 }
 
 export function requireSameOrigin(request: Request) {
@@ -40,8 +50,9 @@ export async function parseActionRequest(request: Request): Promise<{ action: st
   const payload: ActionPayload = {};
   for (const [key, value] of Object.entries(record.payload as Record<string, unknown>)) {
     if (typeof value === "string") payload[key] = value;
-    else if (key === "checklist" && Array.isArray(value) && value.every((item) => typeof item === "string")) payload.checklist = value;
-    else throw new AccessError(`Invalid value for ${key}`, 400);
+    else if (ARRAY_PAYLOAD_KEYS.has(key) && Array.isArray(value) && value.length <= 60 && value.every((item) => typeof item === "string")) {
+      payload[key as "checklist" | "attachmentKeys" | "memberIds" | "ticketIds"] = value as string[];
+    } else throw new AccessError(`Invalid value for ${key}`, 400);
   }
   return { action: record.action, payload };
 }

@@ -1,15 +1,34 @@
 import {
+  addChecklistItems,
   addComment,
   approveRelease,
+  carryForwardTickets,
+  createAnnouncement,
+  createChecklistTemplate,
   createClient,
   createMember,
   createProject,
   createRelease,
+  createReplyTemplate,
   createTicket,
+  deleteAnnouncement,
+  deleteChecklistTemplate,
+  deleteReplyTemplate,
+  editTicket,
   getWorkspace,
+  markDuplicate,
+  removeChecklistItem,
+  resendMemberInvite,
+  savePhases,
+  saveScope,
+  setReleaseStatus,
   updateChecklist,
   updateMember,
+  updateProject,
+  updateProjectTeam,
+  updateRelease,
   updateTicket,
+  withdrawTicket,
 } from "../../../db/workspace";
 import { apiError, json, parseActionRequest, requestActor } from "../http";
 
@@ -30,14 +49,33 @@ export async function POST(request: Request) {
     switch (action) {
       case "createClient": result = await createClient(payload, actor); break;
       case "createMember": result = await createMember(payload, actor); break;
+      case "resendMemberInvite": result = await resendMemberInvite(payload, actor); break;
       case "updateMember": result = await updateMember(payload, actor); break;
       case "createProject": result = await createProject(payload, actor); break;
+      case "updateProject": result = await updateProject(payload, actor); break;
+      case "setReleaseStatus": result = await setReleaseStatus(payload, actor); break;
+      case "updateProjectTeam": result = await updateProjectTeam(payload, actor); break;
       case "createRelease": result = await createRelease(payload, actor); break;
+      case "updateRelease": result = await updateRelease(payload, actor); break;
+      case "createChecklistTemplate": result = await createChecklistTemplate(payload, actor); break;
+      case "deleteChecklistTemplate": result = await deleteChecklistTemplate(payload, actor); break;
       case "createTicket": result = await createTicket(payload, actor); break;
       case "updateTicket": result = await updateTicket(payload, actor); break;
+      case "editTicket": result = await editTicket(payload, actor); break;
+      case "withdrawTicket": result = await withdrawTicket(payload, actor); break;
+      case "markDuplicate": result = await markDuplicate(payload, actor); break;
       case "addComment": result = await addComment(payload, actor); break;
+      case "createReplyTemplate": result = await createReplyTemplate(payload, actor); break;
+      case "deleteReplyTemplate": result = await deleteReplyTemplate(payload, actor); break;
+      case "saveScope": result = await saveScope(payload, actor); break;
+      case "savePhases": result = await savePhases(payload, actor); break;
       case "updateChecklist": result = await updateChecklist(payload, actor); break;
+      case "addChecklistItems": result = await addChecklistItems(payload, actor); break;
+      case "removeChecklistItem": result = await removeChecklistItem(payload, actor); break;
+      case "carryForwardTickets": result = await carryForwardTickets(payload, actor); break;
       case "approveRelease": result = await approveRelease(payload, actor); break;
+      case "createAnnouncement": result = await createAnnouncement(payload, actor); break;
+      case "deleteAnnouncement": result = await deleteAnnouncement(payload, actor); break;
       default: return json({ error: "Unknown action" }, { status: 400 });
     }
     return json({ ok: true, result });

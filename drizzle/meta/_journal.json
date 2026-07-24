@@ -29,6 +29,20 @@
       "when": 1784225456747,
       "tag": "0003_complex_sharon_ventura",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1784229115568,
+      "tag": "0004_thick_rhino",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1784229993444,
+      "tag": "0005_remove_demo_seed",
+      "breakpoints": true
     }
   ]
 }
