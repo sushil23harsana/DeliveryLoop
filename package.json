@@ -9,10 +9,12 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs && vitest run",
+    "test:unit": "vitest run",
+    "test:watch": "vitest",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern worker-configuration.d.ts",
     "typecheck": "tsc --noEmit",
-    "db:generate": "drizzle-kit generate",
+    "db:generate:unsafe": "drizzle-kit generate",
     "db:migrate:local": "wrangler d1 migrations apply deliveryloop-prod --local",
     "db:migrate:remote": "wrangler d1 migrations apply deliveryloop-prod --remote",
     "deploy": "vinext deploy",
@@ -29,6 +31,7 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.45.0",
+    "@cloudflare/vitest-pool-workers": "0.18.8",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
@@ -43,6 +46,7 @@
     "typescript": "5.9.3",
     "vinext": "0.0.50",
     "vite": "8.1.5",
+    "vitest": "4.1.10",
     "wrangler": "4.111.0"
   },
   "type": "module"

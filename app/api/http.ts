@@ -1,11 +1,18 @@
 import { assertAuthConfigured, auth } from "../auth";
+import { isProduction } from "../runtime-env";
 import { AccessError, resolveActor, type Actor } from "../../db/workspace";
 
-export type ActionPayload = Record<string, string> & { checklist?: string[]; attachmentKeys?: string[]; memberIds?: string[] };
+export type ActionPayload = Record<string, string> & { checklist?: string[]; attachmentKeys?: string[]; memberIds?: string[]; ticketIds?: string[] };
 
-const ARRAY_PAYLOAD_KEYS = new Set(["checklist", "attachmentKeys", "memberIds"]);
+const ARRAY_PAYLOAD_KEYS = new Set(["checklist", "attachmentKeys", "memberIds", "ticketIds"]);
 
 function localDemoAllowed(request: Request) {
+  // When this returns true and there is no session, resolveActor synthesises a
+  // full agency_admin with no database row. Hostname alone is too thin a guard
+  // for that: request.url derives from the Host header, so the only thing
+  // standing between an unauthenticated caller and global admin would be
+  // Cloudflare's routing — a routing property, not an application control.
+  if (isProduction()) return false;
   const hostname = new URL(request.url).hostname;
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
 }
@@ -44,7 +51,7 @@ export async function parseActionRequest(request: Request): Promise<{ action: st
   for (const [key, value] of Object.entries(record.payload as Record<string, unknown>)) {
     if (typeof value === "string") payload[key] = value;
     else if (ARRAY_PAYLOAD_KEYS.has(key) && Array.isArray(value) && value.length <= 60 && value.every((item) => typeof item === "string")) {
-      payload[key as "checklist" | "attachmentKeys" | "memberIds"] = value as string[];
+      payload[key as "checklist" | "attachmentKeys" | "memberIds" | "ticketIds"] = value as string[];
     } else throw new AccessError(`Invalid value for ${key}`, 400);
   }
   return { action: record.action, payload };

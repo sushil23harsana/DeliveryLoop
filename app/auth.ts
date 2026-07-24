@@ -8,7 +8,14 @@ import { bindings, isProduction } from "./runtime-env";
 function authSecret() {
   const secret = bindings().BETTER_AUTH_SECRET;
   if (secret) return secret;
-  return "deliveryloop-build-placeholder-secret-runtime-requests-are-blocked";
+  // betterAuth() is constructed at module scope, so throwing here would break
+  // `vinext build` in any environment without the var. A random per-isolate
+  // value keeps the build working while making the fallback unguessable — the
+  // previous constant was a signing key published in the repository. Requests
+  // never reach this state anyway: assertAuthConfigured() runs on every request
+  // path and now refuses to serve without a real secret.
+  console.error(JSON.stringify({ event: "auth_secret_missing" }));
+  return `${crypto.randomUUID()}${crypto.randomUUID()}`;
 }
 
 function authBaseURL() {
@@ -19,7 +26,9 @@ function authBaseURL() {
 }
 
 export function assertAuthConfigured() {
-  if (isProduction() && !bindings().BETTER_AUTH_SECRET) {
+  // Every environment, not just production: a misconfigured preview or staging
+  // deploy would otherwise sign sessions with the random build-time fallback.
+  if (!bindings().BETTER_AUTH_SECRET) {
     throw new Error("Authentication is not configured");
   }
 }

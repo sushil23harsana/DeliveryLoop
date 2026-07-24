@@ -1,12 +1,11 @@
 import type { Metadata } from "next";
-import { Plus_Jakarta_Sans } from "next/font/google";
+import { Geist } from "next/font/google";
 import { headers } from "next/headers";
 import "./globals.css";
 
-const jakarta = Plus_Jakarta_Sans({
-  variable: "--font-jakarta",
+const geist = Geist({
+  variable: "--font-geist",
   subsets: ["latin"],
-  weight: ["400", "500", "600", "700", "800"],
 });
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -31,9 +30,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    // Dark is the default theme; the client flips this attribute when the
+    // stored preference says otherwise, so SSR never renders a light flash.
+    <html lang="en" data-theme="dark">
       <body
-        className={`${jakarta.variable} antialiased`}
+        className={`${geist.variable} antialiased`}
       >
         {children}
       </body>

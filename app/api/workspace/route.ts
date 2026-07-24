@@ -2,6 +2,8 @@ import {
   addChecklistItems,
   addComment,
   approveRelease,
+  carryForwardTickets,
+  createAnnouncement,
   createChecklistTemplate,
   createClient,
   createMember,
@@ -9,6 +11,7 @@ import {
   createRelease,
   createReplyTemplate,
   createTicket,
+  deleteAnnouncement,
   deleteChecklistTemplate,
   deleteReplyTemplate,
   editTicket,
@@ -18,8 +21,10 @@ import {
   resendMemberInvite,
   savePhases,
   saveScope,
+  setReleaseStatus,
   updateChecklist,
   updateMember,
+  updateProject,
   updateProjectTeam,
   updateRelease,
   updateTicket,
@@ -47,6 +52,8 @@ export async function POST(request: Request) {
       case "resendMemberInvite": result = await resendMemberInvite(payload, actor); break;
       case "updateMember": result = await updateMember(payload, actor); break;
       case "createProject": result = await createProject(payload, actor); break;
+      case "updateProject": result = await updateProject(payload, actor); break;
+      case "setReleaseStatus": result = await setReleaseStatus(payload, actor); break;
       case "updateProjectTeam": result = await updateProjectTeam(payload, actor); break;
       case "createRelease": result = await createRelease(payload, actor); break;
       case "updateRelease": result = await updateRelease(payload, actor); break;
@@ -65,7 +72,10 @@ export async function POST(request: Request) {
       case "updateChecklist": result = await updateChecklist(payload, actor); break;
       case "addChecklistItems": result = await addChecklistItems(payload, actor); break;
       case "removeChecklistItem": result = await removeChecklistItem(payload, actor); break;
+      case "carryForwardTickets": result = await carryForwardTickets(payload, actor); break;
       case "approveRelease": result = await approveRelease(payload, actor); break;
+      case "createAnnouncement": result = await createAnnouncement(payload, actor); break;
+      case "deleteAnnouncement": result = await deleteAnnouncement(payload, actor); break;
       default: return json({ error: "Unknown action" }, { status: 400 });
     }
     return json({ ok: true, result });
